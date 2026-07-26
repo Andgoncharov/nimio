@@ -245,6 +245,67 @@ describe("UILayoutManager", () => {
       });
     });
 
+    describe("VOD mode with an auto container dimension", () => {
+      // An auto container HEIGHT derives from the output element itself
+      // (the container is a block element), so sizing the output from the
+      // measured rect feeds back into the container size: the branch
+      // comparison flips between measurements and the layout oscillates
+      // (visible flicker). An auto WIDTH resolves to the parent's width -
+      // definite and feedback-free - so the rect stays trustworthy there.
+
+      it("keeps width as the constraint when the height is auto", () => {
+        const ui = new UILayoutManager("100%", "auto", "16:9");
+
+        // A rect matching the aspect ratio used to flip to height-fit.
+        const wide = ui.fullLayout(1000, 563, MODE.VOD, false);
+        expect(wide.output.width).toBe("100%");
+        expect(wide.output.height).toBe("auto");
+
+        // The intrinsic-size rect the flip produces must map to the very
+        // same styles - a single fixed point instead of an oscillation.
+        const tall = ui.fullLayout(1000, 720, MODE.VOD, false);
+        expect(tall.output.width).toBe("100%");
+        expect(tall.output.height).toBe("auto");
+      });
+
+      it("keeps the rect-based fit when only the width is auto", () => {
+        // Width auto is parent-derived on a block container: the measured
+        // rect is stable, and forcing height-fit here would overflow a
+        // parent narrower than the aspect-sized video.
+        const ui = new UILayoutManager("auto", 400, "16:9");
+
+        const wide = ui.fullLayout(1000, 400, MODE.VOD, false);
+        expect(wide.output.width).toBe("auto");
+        expect(wide.output.height).toBe("100%");
+
+        // A narrow parent letterboxes inside the fixed-height container.
+        const tall = ui.fullLayout(500, 400, MODE.VOD, false);
+        expect(tall.output.width).toBe("100%");
+        expect(tall.output.height).toBe("auto");
+      });
+
+      it("sizes intrinsically when both dimensions are auto", () => {
+        const ui = new UILayoutManager("auto", "auto", "16:9");
+
+        // Rect-independent: the same styles for any measured rect.
+        const wide = ui.fullLayout(1000, 563, MODE.VOD, false);
+        expect(wide.output.width).toBe("auto");
+        expect(wide.output.height).toBe("auto");
+
+        const tall = ui.fullLayout(500, 720, MODE.VOD, false);
+        expect(tall.output.width).toBe("auto");
+        expect(tall.output.height).toBe("auto");
+      });
+
+      it("applies the same constraint in media-element mode", () => {
+        const ui = new UILayoutManager("100%", "auto", "16:9");
+
+        const wide = ui.fullLayout(1000, 563, MODE.LIVE, false, true);
+        expect(wide.output.width).toBe("100%");
+        expect(wide.output.height).toBe("auto");
+      });
+    });
+
     it("returns container dimensions in fullscreen mode", () => {
       const ui = new UILayoutManager(640, 480, "16:9");
 

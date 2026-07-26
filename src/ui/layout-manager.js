@@ -76,15 +76,27 @@ export class UILayoutManager {
         res.output.height = "100%";
       }
     } else if (mode === MODE.VOD || isMediaElementMode) {
-      let cAspect = cWidth / cHeight;
-      let wDiff = (cAspect - this._ar.val) * cHeight;
-      if (wDiff > -1) {
-        // width difference doesn't exceed 1 pixel
-        res.output.height = "100%";
-        res.output.width = isMediaElementMode ? `${cWidth}px` : "auto";
+      const widthAuto = res.container.width === "auto";
+      const heightAuto = res.container.height === "auto";
+      if (heightAuto) {
+        // With an auto HEIGHT the container is sized by the output itself,
+        // so a rect-based fit feeds back and oscillates - width constrains,
+        // aspect-ratio keeps the shape. An auto WIDTH is parent-derived on
+        // a block container, so the rect fit below stays valid for it
+        // (assumes the container remains display:block).
+        res.output.width = widthAuto ? "auto" : "100%";
+        res.output.height = "auto";
       } else {
-        res.output.width = "100%";
-        res.output.height = isMediaElementMode ? `${cHeight}px` : "auto";
+        let cAspect = cWidth / cHeight;
+        let wDiff = (cAspect - this._ar.val) * cHeight;
+        if (wDiff > -1) {
+          // width difference doesn't exceed 1 pixel
+          res.output.height = "100%";
+          res.output.width = isMediaElementMode ? `${cWidth}px` : "auto";
+        } else {
+          res.output.width = "100%";
+          res.output.height = isMediaElementMode ? `${cHeight}px` : "auto";
+        }
       }
     }
 
