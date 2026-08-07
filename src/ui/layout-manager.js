@@ -167,22 +167,20 @@ export class UILayoutManager {
 
   // "intrinsic" - computes to a content-based height, always indefinite
   // (auto, fit-content and friends, and the css-wide keywords that fall
-  // back to auto for height);
+  // back to auto for height - NOT revert/revert-layer, which roll back
+  // to user-origin or lower-layer author styles that may define a
+  // definite height);
   // "definite" - a positively recognized plain absolute length, the
   // only syntax trusted without measurement;
   // "relative" - everything else is context-dependent or unknown
   // (%, var(), env() with a possibly-auto fallback, calc(),
-  // calc-size(), inherit, future grammar) and is resolved by the DOM
-  // probe in ui.js, which measures whether the container's height
-  // actually follows the output.
+  // calc-size(), inherit, revert, revert-layer, future grammar) and is
+  // resolved by the DOM probe in ui.js, which measures whether the
+  // container's height actually follows the output.
   _cssSizeKind(value) {
     if (!value) return "intrinsic";
     const v = String(value).trim().toLowerCase();
-    if (
-      /^(auto|fit-content|min-content|max-content|initial|unset|revert)\b/.test(
-        v,
-      )
-    ) {
+    if (/^(auto|fit-content|min-content|max-content|initial|unset)\b/.test(v)) {
       return "intrinsic";
     }
     if (

@@ -23,6 +23,9 @@ const HOSTILE_CSS = `
   .hostile-transition canvas {
     transition: height 1s linear;
   }
+  .revert-target {
+    height: 300px;
+  }
 `;
 
 describe("containerHeightIndependent", () => {
@@ -45,7 +48,14 @@ describe("containerHeightIndependent", () => {
   // Builds the production DOM shape: a parent (host page), the nimio
   // container with the configured css height inline, and a canvas
   // output inside it.
-  function build({ parentCss, height, ancestorCss, parentClass, vars }) {
+  function build({
+    parentCss,
+    height,
+    ancestorCss,
+    parentClass,
+    vars,
+    containerClass,
+  }) {
     let mount = root;
     if (ancestorCss !== undefined) {
       const ancestor = document.createElement("div");
@@ -62,6 +72,7 @@ describe("containerHeightIndependent", () => {
     mount.appendChild(parent);
 
     const container = document.createElement("div");
+    if (containerClass) container.className = containerClass;
     Object.assign(container.style, {
       display: "block",
       position: "relative",
@@ -244,6 +255,29 @@ describe("containerHeightIndependent", () => {
       "calc(50vh - 10px) in a heightless parent",
       { parentCss: "display:block", height: "calc(50vh - 10px)" },
       true,
+    ],
+    // Finding: revert-layer in the style attribute rolls back into
+    // author stylesheet rules - a lower-layer definite height must
+    // win, so the rect fit survives. Without such a rule it computes
+    // to auto.
+    [
+      "revert-layer exposing a definite stylesheet height",
+      {
+        parentCss: "display:block",
+        height: "revert-layer",
+        containerClass: "revert-target",
+      },
+      true,
+    ],
+    [
+      "revert-layer with no stylesheet height behind it",
+      { parentCss: "display:block", height: "revert-layer" },
+      false,
+    ],
+    [
+      "revert with no user-origin height behind it",
+      { parentCss: "display:block", height: "revert" },
+      false,
     ],
     // Finding: pseudo-element rules on empty children fooled the
     // element-insertion probe; nothing is inserted now.
@@ -540,6 +574,57 @@ describe("containerHeightIndependent", () => {
     const parent = document.createElement("div");
     parent.style.cssText = "display:block;width:400px";
     shadow.appendChild(parent);
+    const container = document.createElement("div");
+    Object.assign(container.style, {
+      display: "block",
+      position: "relative",
+      width: "100%",
+      height: "100%",
+    });
+    parent.appendChild(container);
+    const canvas = document.createElement("canvas");
+    canvas.width = 1280;
+    canvas.height = 720;
+    Object.assign(canvas.style, {
+      display: "block",
+      width: "100%",
+      height: "225px",
+    });
+    container.appendChild(canvas);
+
+    scroller.scrollTop = 250;
+    expect(scroller.scrollTop).toBe(250);
+
+    containerHeightIndependent(container, canvas);
+
+    expect(scroller.scrollTop).toBe(250);
+  });
+
+  it("preserves scroll positions for ancestors adopted into an iframe document", async () => {
+    // Finding: instanceof Element is realm-specific - an ancestor
+    // living in a same-origin iframe's document has a different
+    // Element prototype, and the walk must not stop there.
+    const iframe = document.createElement("iframe");
+    iframe.style.cssText = "width:500px;height:400px;border:0";
+    root.appendChild(iframe);
+    await new Promise((resolve) => {
+      if (iframe.contentDocument?.readyState === "complete") resolve();
+      else iframe.addEventListener("load", resolve, { once: true });
+    });
+    const idoc = iframe.contentDocument;
+
+    const scroller = idoc.createElement("div");
+    scroller.style.cssText = "height:200px;overflow:auto";
+    const spacer = idoc.createElement("div");
+    spacer.style.cssText = "height:300px";
+    scroller.appendChild(spacer);
+    idoc.body.appendChild(scroller);
+
+    // Elements created in THIS realm, adopted into the iframe's
+    // document - their ancestors are foreign-realm objects.
+    const parent = document.createElement("div");
+    parent.style.cssText = "display:block;width:400px";
+    scroller.appendChild(parent);
     const container = document.createElement("div");
     Object.assign(container.style, {
       display: "block",

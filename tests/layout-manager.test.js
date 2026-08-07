@@ -441,8 +441,38 @@ describe("UILayoutManager", () => {
         expect(result.output.height).toBe("100%");
       });
 
+      it("resolves revert and revert-layer through the probe flag", () => {
+        // revert-layer from inline style can land on a definite
+        // stylesheet height, so the measured verdict decides.
+        for (const height of ["revert", "revert-layer"]) {
+          const ui = new UILayoutManager("100%", height, "16:9");
+
+          const dependent = ui.fullLayout(
+            1000,
+            563,
+            MODE.VOD,
+            false,
+            false,
+            false,
+          );
+          expect(dependent.output.width).toBe("100%");
+          expect(dependent.output.height).toBe("auto");
+
+          const independent = ui.fullLayout(
+            2000,
+            1000,
+            MODE.VOD,
+            false,
+            false,
+            true,
+          );
+          expect(independent.output.width).toBe("auto");
+          expect(independent.output.height).toBe("100%");
+        }
+      });
+
       it("treats css-wide keywords and keyword case variants as indefinite", () => {
-        for (const height of ["AUTO", " auto ", "initial", "unset", "revert"]) {
+        for (const height of ["AUTO", " auto ", "initial", "unset"]) {
           const ui = new UILayoutManager("100%", height, "16:9");
 
           // These compute to auto, so the flag must not matter.
@@ -639,10 +669,21 @@ describe("UILayoutManager", () => {
     });
 
     it("is false for css-wide keywords and keyword case variants", () => {
-      for (const height of ["AUTO", " auto ", "initial", "unset", "revert"]) {
+      for (const height of ["AUTO", " auto ", "initial", "unset"]) {
         expect(
           new UILayoutManager("100%", height, "16:9").heightNeedsProbe(),
         ).toBe(false);
+      }
+    });
+
+    it("is true for revert and revert-layer", () => {
+      // revert-layer from the style attribute falls back into author
+      // stylesheet rules, which may define a definite height; revert
+      // can expose user-origin styles. Both must be measured.
+      for (const height of ["revert", "revert-layer"]) {
+        expect(
+          new UILayoutManager("100%", height, "16:9").heightNeedsProbe(),
+        ).toBe(true);
       }
     });
 

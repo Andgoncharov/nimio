@@ -45,9 +45,12 @@ export function containerHeightIndependent(container, output) {
 
   const savedCss = output.style.cssText;
   const savedScrolls = [];
+  // nodeType instead of instanceof: an ancestor adopted into a
+  // same-origin iframe's document belongs to another realm, where the
+  // local Element global would not match.
   for (
     let node = container;
-    node instanceof Element;
+    node && node.nodeType === 1;
     node =
       node.assignedSlot ?? node.parentElement ?? node.getRootNode().host ?? null
   ) {
