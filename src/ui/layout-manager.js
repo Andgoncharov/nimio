@@ -87,7 +87,7 @@ export class UILayoutManager {
         res.output.height = "100%";
       }
     } else if (mode === MODE.VOD || isMediaElementMode) {
-      const widthAuto = res.container.width === "auto";
+      const widthAuto = this._cssSizeKind(this._cssWidth) === "intrinsic";
       const heightIndefinite =
         !isFullscreen && this._isHeightIndefinite(parentHeightDefinite);
       if (heightIndefinite) {
@@ -165,15 +165,30 @@ export class UILayoutManager {
     this._ar = { x, y, str: `${x} / ${y}`, val: x / y };
   }
 
-  // "intrinsic" - content-based, always indefinite (auto, fit-content, ...);
-  // "relative" - contains a percentage, definite only when the parent
-  // height is definite (the caller resolves that with a DOM probe);
+  // "intrinsic" - computes to a content-based height, always indefinite
+  // (auto, fit-content and friends, and the css-wide keywords that fall
+  // back to auto for height);
+  // "relative" - definite only when the parent height is definite, which
+  // the caller resolves with a DOM probe: percentages by CSS rule;
+  // inherit because it copies the parent's computed height, whose
+  // definiteness is exactly what the probe measures; var() because it
+  // can hide any value and the probe branch is stable either way (at
+  // worst a definite var() in an auto-height parent loses the letterbox
+  // fit, while guessing "definite" could reintroduce the oscillation);
   // "definite" - an absolute length, always trustworthy for the rect fit.
   _cssSizeKind(value) {
-    if (!value || /^(auto|fit-content|min-content|max-content)\b/.test(value)) {
+    if (!value) return "intrinsic";
+    const v = String(value).trim().toLowerCase();
+    if (
+      /^(auto|fit-content|min-content|max-content|initial|unset|revert)\b/.test(
+        v,
+      )
+    ) {
       return "intrinsic";
     }
-    if (value.includes("%")) return "relative";
+    if (v.includes("%") || v.includes("var(") || v === "inherit") {
+      return "relative";
+    }
     return "definite";
   }
 

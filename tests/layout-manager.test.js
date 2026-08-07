@@ -440,6 +440,86 @@ describe("UILayoutManager", () => {
         expect(result.output.height).toBe("100%");
       });
 
+      it("treats css-wide keywords and keyword case variants as indefinite", () => {
+        for (const height of ["AUTO", " auto ", "initial", "unset", "revert"]) {
+          const ui = new UILayoutManager("100%", height, "16:9");
+
+          // These compute to auto, so the flag must not matter.
+          const result = ui.fullLayout(
+            2000,
+            1000,
+            MODE.VOD,
+            false,
+            false,
+            true,
+          );
+          expect(result.output.width).toBe("100%");
+          expect(result.output.height).toBe("auto");
+        }
+      });
+
+      it("resolves inherit through the parent flag", () => {
+        const ui = new UILayoutManager("100%", "inherit", "16:9");
+
+        const indefinite = ui.fullLayout(
+          1000,
+          563,
+          MODE.VOD,
+          false,
+          false,
+          false,
+        );
+        expect(indefinite.output.width).toBe("100%");
+        expect(indefinite.output.height).toBe("auto");
+
+        const definite = ui.fullLayout(
+          2000,
+          1000,
+          MODE.VOD,
+          false,
+          false,
+          true,
+        );
+        expect(definite.output.width).toBe("auto");
+        expect(definite.output.height).toBe("100%");
+      });
+
+      it("resolves var() heights through the parent flag", () => {
+        const ui = new UILayoutManager("100%", "var(--player-height)", "16:9");
+
+        const indefinite = ui.fullLayout(
+          1000,
+          563,
+          MODE.VOD,
+          false,
+          false,
+          false,
+        );
+        expect(indefinite.output.width).toBe("100%");
+        expect(indefinite.output.height).toBe("auto");
+
+        const definite = ui.fullLayout(
+          2000,
+          1000,
+          MODE.VOD,
+          false,
+          false,
+          true,
+        );
+        expect(definite.output.width).toBe("auto");
+        expect(definite.output.height).toBe("100%");
+      });
+
+      it("keeps an intrinsic width for content-based width keywords", () => {
+        // A fit-content width is sized by the output too; forcing
+        // width:100% against it would be cyclic.
+        const ui = new UILayoutManager("fit-content", "auto", "16:9");
+
+        const result = ui.fullLayout(1000, 563, MODE.VOD, false, false, false);
+        expect(result.output.width).toBe("auto");
+        expect(result.output.height).toBe("auto");
+      });
+
       it("sizes intrinsically for frame-sized players before the first frame", () => {
         const ui = new UILayoutManager(undefined, undefined, "16:9");
 
@@ -502,9 +582,40 @@ describe("UILayoutManager", () => {
       ).toBe(false);
     });
 
+    it("is false for css-wide keywords and keyword case variants", () => {
+      for (const height of ["AUTO", " auto ", "initial", "unset", "revert"]) {
+        expect(
+          new UILayoutManager("100%", height, "16:9").heightNeedsParentProbe(),
+        ).toBe(false);
+      }
+    });
+
     it("is true for percentage heights", () => {
       expect(
         new UILayoutManager("100%", "100%", "16:9").heightNeedsParentProbe(),
+      ).toBe(true);
+      expect(
+        new UILayoutManager("100%", " 100% ", "16:9").heightNeedsParentProbe(),
+      ).toBe(true);
+    });
+
+    it("is true for inherit", () => {
+      // inherit copies the parent's computed height, so its definiteness
+      // is exactly what the parent probe measures.
+      expect(
+        new UILayoutManager("100%", "inherit", "16:9").heightNeedsParentProbe(),
+      ).toBe(true);
+    });
+
+    it("is true for var() heights", () => {
+      // A custom property can hide any value; the probe keeps the layout
+      // stable either way, so it decides.
+      expect(
+        new UILayoutManager(
+          "100%",
+          "var(--player-height)",
+          "16:9",
+        ).heightNeedsParentProbe(),
       ).toBe(true);
     });
 
