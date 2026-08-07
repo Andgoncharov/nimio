@@ -614,6 +614,33 @@ describe("UILayoutManager", () => {
     });
   });
 
+  describe("canLayout", () => {
+    // ui.js consults this before running the DOM probe: when fullLayout
+    // would bail anyway (no aspect ratio yet, or paused), the probe's
+    // forced layouts are wasted work.
+
+    it("is false without an aspect ratio", () => {
+      expect(new UILayoutManager(640, 480).canLayout()).toBe(false);
+    });
+
+    it("is false while paused", () => {
+      const ui = new UILayoutManager(640, 480, "16:9");
+      ui.pause();
+
+      expect(ui.canLayout()).toBe(false);
+    });
+
+    it("is true with an aspect ratio while not paused", () => {
+      const ui = new UILayoutManager(640, 480, "16:9");
+
+      expect(ui.canLayout()).toBe(true);
+
+      ui.pause();
+      ui.resume();
+      expect(ui.canLayout()).toBe(true);
+    });
+  });
+
   describe("heightNeedsProbe", () => {
     // ui.js runs a DOM probe (does the container height follow the
     // output?) only for context-dependent heights - %, var(), inherit -

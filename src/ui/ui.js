@@ -640,6 +640,7 @@ export class UI {
       !isFullscreen &&
       !canvasOutput &&
       output &&
+      this._layoutMgr.canLayout() &&
       this._layoutMgr.heightNeedsProbe()
     ) {
       const probed = containerHeightIndependent(this._container, output);

@@ -78,8 +78,14 @@ export function containerHeightIndependent(container, output) {
     }
     output.style.cssText = savedCss;
     for (const [node, top, left] of savedScrolls) {
-      node.scrollTop = top;
-      node.scrollLeft = left;
+      // behavior:"instant" so a host `scroll-behavior: smooth` cannot
+      // animate the restoration on engines that keep the clamped offset
+      if (typeof node.scrollTo === "function") {
+        node.scrollTo({ top, left, behavior: "instant" });
+      } else {
+        node.scrollTop = top;
+        node.scrollLeft = left;
+      }
     }
   }
   return low === high;

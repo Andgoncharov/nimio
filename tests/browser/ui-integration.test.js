@@ -9,6 +9,11 @@ import { MODE } from "@/shared/values";
 
 const stubBus = { on() {}, off() {}, emit() {} };
 
+// Long enough that the fade is still live when the resize event
+// reaches the probe on a slow CI runner (ResizeObserver delivery plus
+// two rAF hops can stretch past half a second under contention).
+const FADE_MS = 1500;
+
 function waitFrames(n = 2) {
   return new Promise((resolve) => {
     const step = (left) =>
@@ -45,14 +50,14 @@ describe("UI probe integration", () => {
     parent = undefined;
   });
 
-  async function buildVodPlayer() {
+  async function buildVodPlayer(optOverrides = {}) {
     parent = document.createElement("div");
     parent.style.cssText = "display:block;width:800px";
     document.body.appendChild(parent);
     ui = new UI(
       "probe-it",
       parent,
-      { width: "100%", height: "100%", vod: {}, ar: "16:9" },
+      { width: "100%", height: "100%", vod: {}, ar: "16:9", ...optOverrides },
       stubBus,
     );
     ui._mode = MODE.VOD;
@@ -63,7 +68,7 @@ describe("UI probe integration", () => {
 
   async function deferProbeWithFade() {
     const media = ui._mediaElement;
-    media.style.transition = "opacity 0.25s linear";
+    media.style.transition = `opacity ${FADE_MS}ms linear`;
     void media.offsetHeight;
     media.style.opacity = "0.5";
     await waitFrames(2);
@@ -72,6 +77,20 @@ describe("UI probe integration", () => {
     parent.style.height = "300px";
     await until(() => ui._probeRetryPending === true);
     expect(ui._probeRetryPending).toBe(true);
+  }
+
+  // Counts probe entries by instrumenting the getAnimations call the
+  // probe makes first; production behavior is otherwise untouched.
+  function countProbeTouches(...elements) {
+    const counter = { count: 0 };
+    for (const el of elements) {
+      const original = el.getAnimations.bind(el);
+      el.getAnimations = () => {
+        counter.count++;
+        return original();
+      };
+    }
+    return counter;
   }
 
   it("applies the probed layout through the real resize path", async () => {
@@ -91,6 +110,7 @@ describe("UI probe integration", () => {
     // definite, so the rect fit (height-constrained) must come back.
     const recovered = await until(
       () => ui._mediaElement.style.height === "100%",
+      FADE_MS + 2500,
     );
     expect(recovered).toBe(true);
     expect(ui._probeRetryPending).toBe(false);
@@ -105,8 +125,62 @@ describe("UI probe integration", () => {
     // The retry fires after the fade ends; the isConnected guard must
     // swallow it without touching the destroyed player (an unhandled
     // error here fails the test).
-    await wait(500);
+    await wait(FADE_MS + 500);
     expect(ui._container.isConnected).toBe(false);
+  });
+
+  it("keeps the original auto-height scenario stable end to end", async () => {
+    // The literal PR #86 configuration on the production UI class:
+    // height auto never probes, and the layout must hold a fixed point.
+    await buildVodPlayer({ height: "auto" });
+
+    await until(
+      () =>
+        ui._mediaElement.style.height === "auto" &&
+        ui._mediaElement.style.width === "100%",
+    );
+    const settledHeight = ui._container.getBoundingClientRect().height;
+    await wait(400);
+    expect(ui._container.getBoundingClientRect().height).toBe(settledHeight);
+    expect(ui._mediaElement.style.height).toBe("auto");
+    expect(ui._mediaElement.style.width).toBe("100%");
+  });
+
+  it("skips the probe in PiP mode and in LIVE canvas mode", async () => {
+    // Regression pin for the !isFullscreen && !canvasOutput guard: a
+    // viewport-sized PiP container and the LIVE canvas branch must
+    // never pay for (or be perturbed by) the probe.
+    await buildVodPlayer();
+    const touches = countProbeTouches(ui._mediaElement, ui._canvas);
+
+    ui._mode = MODE.LIVE;
+    ui._resizeAndRedraw({ width: 800, height: 450 }, false);
+
+    ui._mode = MODE.VOD;
+    ui._pipContainer = document.createElement("div");
+    document.body.appendChild(ui._pipContainer);
+    ui._resizeAndRedraw({ width: 800, height: 450 }, true);
+    ui._pipContainer.remove();
+    ui._pipContainer = undefined;
+
+    expect(touches.count).toBe(0);
+
+    // Sanity: the plain VOD path does probe, so the counter has teeth.
+    ui._resizeAndRedraw({ width: 800, height: 450 }, false);
+    expect(touches.count).toBeGreaterThan(0);
+  });
+
+  it("skips the probe while the layout manager is paused", async () => {
+    // fullLayout() bails when paused; the probe's forced layouts must
+    // not run for nothing on every resize event.
+    await buildVodPlayer();
+    const touches = countProbeTouches(ui._mediaElement);
+
+    ui._layoutMgr.pause();
+    ui._resizeAndRedraw({ width: 800, height: 450 }, false);
+    ui._layoutMgr.resume();
+
+    expect(touches.count).toBe(0);
   });
 
   it("survives replaceMediaElement() while a deferred retry is pending", async () => {
@@ -122,6 +196,7 @@ describe("UI probe integration", () => {
     // definite-parent verdict to the replacement.
     const recovered = await until(
       () => ui._mediaElement.style.height === "100%",
+      FADE_MS + 2500,
     );
     expect(recovered).toBe(true);
   });

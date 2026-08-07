@@ -651,6 +651,50 @@ describe("containerHeightIndependent", () => {
     expect(scroller.scrollTop).toBe(250);
   });
 
+  it("restores a smooth-behavior scroller instantly", () => {
+    // The restore must not glide: behavior:"instant" bypasses a host
+    // `scroll-behavior: smooth` on engines that keep the clamped
+    // offset. Pinned here; Chromium restores within the task anyway.
+    const scroller = document.createElement("div");
+    scroller.style.cssText =
+      "height:200px;overflow:auto;scroll-behavior:smooth";
+    const spacer = document.createElement("div");
+    spacer.style.cssText = "height:300px";
+    scroller.appendChild(spacer);
+    root.appendChild(scroller);
+
+    const parent = document.createElement("div");
+    parent.style.cssText = "display:block;width:400px";
+    scroller.appendChild(parent);
+    const container = document.createElement("div");
+    Object.assign(container.style, {
+      display: "block",
+      position: "relative",
+      width: "100%",
+      height: "100%",
+    });
+    parent.appendChild(container);
+    const canvas = document.createElement("canvas");
+    canvas.width = 1280;
+    canvas.height = 720;
+    Object.assign(canvas.style, {
+      display: "block",
+      width: "100%",
+      height: "225px",
+    });
+    container.appendChild(canvas);
+
+    // Even the setup needs behavior:"instant" - a plain scrollTop
+    // assignment on a smooth scroller animates and reads back 0.
+    scroller.scrollTo({ top: 250, behavior: "instant" });
+    expect(scroller.scrollTop).toBe(250);
+
+    containerHeightIndependent(container, canvas);
+
+    // Synchronously back at the exact offset - no smooth glide pending.
+    expect(scroller.scrollTop).toBe(250);
+  });
+
   it("preserves ancestor scroll positions", () => {
     // Finding: the 1px pass shrinks an overflowing ancestor's scroll
     // range, and the browser's scrollTop clamp survives restoration.

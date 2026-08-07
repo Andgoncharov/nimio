@@ -59,6 +59,10 @@ export class UILayoutManager {
     };
   }
 
+  canLayout() {
+    return !!this._ar && !this._paused;
+  }
+
   heightNeedsProbe() {
     return this._cssSizeKind(this._cssHeight) === "relative";
   }
