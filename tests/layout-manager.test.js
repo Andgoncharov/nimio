@@ -306,6 +306,149 @@ describe("UILayoutManager", () => {
       });
     });
 
+    describe("VOD mode with an indefinite container height", () => {
+      // The flicker guard must key on definiteness, not on the literal
+      // "auto": a percentage height inside a parent with no definite
+      // height behaves as auto, so the rect-based fit feeds back and
+      // oscillates the same way. Definiteness of a percentage is decided
+      // by the caller (a DOM probe in ui.js) and passed in as the
+      // parentHeightDefinite flag - the last fullLayout argument below.
+
+      it("uses width as the constraint for a percentage height when the parent height is indefinite", () => {
+        const ui = new UILayoutManager("100%", "100%", "16:9");
+
+        const wide = ui.fullLayout(1000, 563, MODE.VOD, false, false, false);
+        expect(wide.output.width).toBe("100%");
+        expect(wide.output.height).toBe("auto");
+
+        // The intrinsic-size rect those styles produce must map back to
+        // the very same styles - a single fixed point, no oscillation.
+        const tall = ui.fullLayout(1000, 720, MODE.VOD, false, false, false);
+        expect(tall.output.width).toBe("100%");
+        expect(tall.output.height).toBe("auto");
+      });
+
+      it("keeps the rect-based fit for a percentage height when the parent height is definite", () => {
+        // Here the rect is trustworthy and dropping the fit would lose
+        // letterboxing (and overflow a shorter-than-aspect box).
+        const ui = new UILayoutManager("100%", "100%", "16:9");
+
+        const wide = ui.fullLayout(2000, 1000, MODE.VOD, false, false, true);
+        expect(wide.output.width).toBe("auto");
+        expect(wide.output.height).toBe("100%");
+
+        const narrow = ui.fullLayout(500, 400, MODE.VOD, false, false, true);
+        expect(narrow.output.width).toBe("100%");
+        expect(narrow.output.height).toBe("auto");
+      });
+
+      it("treats content-based height keywords as indefinite regardless of the flag", () => {
+        for (const height of ["fit-content", "min-content", "max-content"]) {
+          const ui = new UILayoutManager("100%", height, "16:9");
+
+          const result = ui.fullLayout(1000, 563, MODE.VOD, false, false, true);
+          expect(result.output.width).toBe("100%");
+          expect(result.output.height).toBe("auto");
+        }
+      });
+
+      it("classifies functions containing a percentage by the parent's definiteness", () => {
+        for (const height of ["calc(100% - 40px)", "min(100%, 480px)"]) {
+          const ui = new UILayoutManager("100%", height, "16:9");
+
+          const indefinite = ui.fullLayout(
+            1000,
+            563,
+            MODE.VOD,
+            false,
+            false,
+            false,
+          );
+          expect(indefinite.output.width).toBe("100%");
+          expect(indefinite.output.height).toBe("auto");
+
+          const definite = ui.fullLayout(
+            2000,
+            1000,
+            MODE.VOD,
+            false,
+            false,
+            true,
+          );
+          expect(definite.output.width).toBe("auto");
+          expect(definite.output.height).toBe("100%");
+        }
+      });
+
+      it("keeps the rect-based fit for absolute heights regardless of the flag", () => {
+        for (const height of ["480px", "50vh", "20em"]) {
+          const ui = new UILayoutManager("100%", height, "16:9");
+
+          const result = ui.fullLayout(
+            2000,
+            1000,
+            MODE.VOD,
+            false,
+            false,
+            false,
+          );
+          expect(result.output.width).toBe("auto");
+          expect(result.output.height).toBe("100%");
+        }
+      });
+
+      it("keeps the rect-based fit in fullscreen where the container is viewport-sized", () => {
+        const ui = new UILayoutManager("100%", "100%", "16:9");
+
+        const result = ui.fullLayout(2000, 1000, MODE.VOD, true, false, false);
+        expect(result.output.width).toBe("auto");
+        expect(result.output.height).toBe("100%");
+      });
+
+      it("combines an auto width with an indefinite percentage height", () => {
+        const ui = new UILayoutManager("auto", "100%", "16:9");
+
+        const result = ui.fullLayout(1000, 563, MODE.VOD, false, false, false);
+        expect(result.output.width).toBe("auto");
+        expect(result.output.height).toBe("auto");
+      });
+
+      it("applies the same constraint in media-element mode", () => {
+        const ui = new UILayoutManager("100%", "100%", "16:9");
+
+        const result = ui.fullLayout(1000, 563, MODE.LIVE, false, true, false);
+        expect(result.output.width).toBe("100%");
+        expect(result.output.height).toBe("auto");
+      });
+
+      it("uses pixel sizes in media-element mode when the parent height is definite", () => {
+        const ui = new UILayoutManager("100%", "100%", "16:9");
+
+        const result = ui.fullLayout(2000, 1000, MODE.LIVE, false, true, true);
+        expect(result.output.width).toBe("2000px");
+        expect(result.output.height).toBe("100%");
+      });
+
+      it("uses the rect-based fit for frame-sized players once the frame size is known", () => {
+        // Empty width/height settings resolve to pixel dimensions on the
+        // first frame - definite from then on, whatever the flag says.
+        const ui = new UILayoutManager(undefined, undefined, "16:9");
+        ui.setFrameSize(1920, 1080);
+
+        const result = ui.fullLayout(2000, 1000, MODE.VOD, false, false, false);
+        expect(result.output.width).toBe("auto");
+        expect(result.output.height).toBe("100%");
+      });
+
+      it("sizes intrinsically for frame-sized players before the first frame", () => {
+        const ui = new UILayoutManager(undefined, undefined, "16:9");
+
+        const result = ui.fullLayout(1000, 563, MODE.VOD, false, false, false);
+        expect(result.output.width).toBe("auto");
+        expect(result.output.height).toBe("auto");
+      });
+    });
+
     it("returns container dimensions in fullscreen mode", () => {
       const ui = new UILayoutManager(640, 480, "16:9");
 
@@ -326,6 +469,67 @@ describe("UILayoutManager", () => {
         "object-fit": "fill",
         "aspect-ratio": "16 / 9",
       });
+    });
+  });
+
+  describe("heightNeedsParentProbe", () => {
+    // ui.js runs a DOM probe against the container's parent only when
+    // the configured height is percentage-based - the sole case whose
+    // definiteness the layout manager can't classify on its own.
+
+    it("is false for intrinsic heights", () => {
+      expect(
+        new UILayoutManager("100%", "auto", "16:9").heightNeedsParentProbe(),
+      ).toBe(false);
+      expect(
+        new UILayoutManager(
+          "100%",
+          "fit-content",
+          "16:9",
+        ).heightNeedsParentProbe(),
+      ).toBe(false);
+      expect(
+        new UILayoutManager("100%", undefined, "16:9").heightNeedsParentProbe(),
+      ).toBe(false);
+    });
+
+    it("is false for definite heights", () => {
+      expect(
+        new UILayoutManager("100%", 480, "16:9").heightNeedsParentProbe(),
+      ).toBe(false);
+      expect(
+        new UILayoutManager("100%", "50vh", "16:9").heightNeedsParentProbe(),
+      ).toBe(false);
+    });
+
+    it("is true for percentage heights", () => {
+      expect(
+        new UILayoutManager("100%", "100%", "16:9").heightNeedsParentProbe(),
+      ).toBe(true);
+    });
+
+    it("is true for functions containing a percentage", () => {
+      expect(
+        new UILayoutManager(
+          "100%",
+          "calc(100% - 40px)",
+          "16:9",
+        ).heightNeedsParentProbe(),
+      ).toBe(true);
+      expect(
+        new UILayoutManager(
+          "100%",
+          "min(100%, 480px)",
+          "16:9",
+        ).heightNeedsParentProbe(),
+      ).toBe(true);
+    });
+
+    it("is false once frame sizing resolves empty dimensions to pixels", () => {
+      const ui = new UILayoutManager();
+      ui.setFrameSize(1920, 1080);
+
+      expect(ui.heightNeedsParentProbe()).toBe(false);
     });
   });
 

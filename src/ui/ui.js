@@ -625,12 +625,18 @@ export class UI {
   }
 
   _resizeAndRedraw(rect, pipMode) {
+    const isFullscreen = pipMode || this._isPlayerFullscreen();
+    let parentHeightDefinite = false;
+    if (!isFullscreen && this._layoutMgr.heightNeedsParentProbe()) {
+      parentHeightDefinite = this._isParentHeightDefinite();
+    }
     let cssProps = this._layoutMgr.fullLayout(
       rect.width,
       rect.height,
       this._mode,
-      pipMode || this._isPlayerFullscreen(),
+      isFullscreen,
       this._mediaElementMode,
+      parentHeightDefinite,
     );
     if (cssProps) {
       let container = pipMode ? this._pipContainer : this._container;
@@ -663,6 +669,24 @@ export class UI {
       }
       this._updateCanvasSize();
     }
+  }
+
+  _isParentHeightDefinite() {
+    const parent = this._container.parentElement;
+    if (!parent) return false;
+    // A percentage height resolves only against a definite containing
+    // block, and definiteness is recursive (the parent may itself be a
+    // percentage of an auto-height ancestor) - so ask the layout engine
+    // with an in-flow probe. flex-shrink:0 keeps the probe from
+    // collapsing inside a column flex parent. The synchronous
+    // append/measure/remove never reaches a rendering step, so the
+    // ResizeObserver does not see it.
+    const probe = document.createElement("div");
+    probe.style.cssText = "height:100%;width:0;visibility:hidden;flex-shrink:0";
+    parent.appendChild(probe);
+    const definite = probe.offsetHeight > 0;
+    probe.remove();
+    return definite;
   }
 
   _updateCanvasSize() {

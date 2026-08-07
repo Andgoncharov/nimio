@@ -59,7 +59,18 @@ export class UILayoutManager {
     };
   }
 
-  fullLayout(cWidth, cHeight, mode, isFullscreen, isMediaElementMode) {
+  heightNeedsParentProbe() {
+    return this._cssSizeKind(this._cssHeight) === "relative";
+  }
+
+  fullLayout(
+    cWidth,
+    cHeight,
+    mode,
+    isFullscreen,
+    isMediaElementMode,
+    parentHeightDefinite = false,
+  ) {
     if (!this._ar || this._paused) return null;
 
     let res = { container: this.containerLayout(isFullscreen) };
@@ -77,13 +88,16 @@ export class UILayoutManager {
       }
     } else if (mode === MODE.VOD || isMediaElementMode) {
       const widthAuto = res.container.width === "auto";
-      const heightAuto = res.container.height === "auto";
-      if (heightAuto) {
-        // With an auto HEIGHT the container is sized by the output itself,
-        // so a rect-based fit feeds back and oscillates - width constrains,
-        // aspect-ratio keeps the shape. An auto WIDTH is parent-derived on
-        // a block container, so the rect fit below stays valid for it
-        // (assumes the container remains display:block).
+      const heightIndefinite =
+        !isFullscreen && this._isHeightIndefinite(parentHeightDefinite);
+      if (heightIndefinite) {
+        // With an indefinite HEIGHT (auto, a content-based keyword, or a
+        // percentage against a parent with no definite height) the
+        // container is sized by the output itself, so a rect-based fit
+        // feeds back and oscillates - width constrains, aspect-ratio
+        // keeps the shape. An auto WIDTH is parent-derived on a block
+        // container, so the rect fit below stays valid for it (assumes
+        // the container remains display:block).
         res.output.width = widthAuto ? "auto" : "100%";
         res.output.height = "auto";
       } else {
@@ -149,6 +163,25 @@ export class UILayoutManager {
     if (isNaN(x) || isNaN(y)) return;
 
     this._ar = { x, y, str: `${x} / ${y}`, val: x / y };
+  }
+
+  // "intrinsic" - content-based, always indefinite (auto, fit-content, ...);
+  // "relative" - contains a percentage, definite only when the parent
+  // height is definite (the caller resolves that with a DOM probe);
+  // "definite" - an absolute length, always trustworthy for the rect fit.
+  _cssSizeKind(value) {
+    if (!value || /^(auto|fit-content|min-content|max-content)\b/.test(value)) {
+      return "intrinsic";
+    }
+    if (value.includes("%")) return "relative";
+    return "definite";
+  }
+
+  _isHeightIndefinite(parentHeightDefinite) {
+    const kind = this._cssSizeKind(this._cssHeight);
+    if (kind === "intrinsic") return true;
+    if (kind === "relative") return !parentHeightDefinite;
+    return false;
   }
 
   _toCssSize(value) {
