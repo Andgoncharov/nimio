@@ -639,7 +639,13 @@ export class UI {
       output &&
       this._layoutMgr.heightNeedsProbe()
     ) {
-      heightIndependent = containerHeightIndependent(this._container, output);
+      const probed = containerHeightIndependent(this._container, output);
+      if (probed !== null) {
+        // null means the probe deferred (a transition is running on
+        // the output); keep the last verdict until it can re-measure.
+        this._heightIndependent = probed;
+      }
+      heightIndependent = this._heightIndependent ?? false;
     }
     let cssProps = this._layoutMgr.fullLayout(
       rect.width,

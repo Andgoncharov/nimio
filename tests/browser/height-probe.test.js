@@ -347,6 +347,110 @@ describe("containerHeightIndependent", () => {
     expect(canvas.offsetHeight).toBe(steady);
   });
 
+  it("defers measurement while a transition runs on the output", async () => {
+    // Finding: pinning transition:none cancels every running CSS
+    // transition on the output, snapping it to its end value. A live
+    // transition must survive the probe untouched - the verdict is
+    // deferred (null) and the caller reuses its previous one.
+    const { container, canvas } = build({
+      parentCss: "display:block",
+      parentClass: "hostile-transition",
+      height: "100%",
+    });
+    canvas.style.height = "50px";
+    void canvas.offsetHeight;
+    canvas.style.height = "400px";
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+    expect(
+      canvas
+        .getAnimations()
+        .some(
+          (a) => a.transitionProperty === "height" && a.playState === "running",
+        ),
+    ).toBe(true);
+    let cancelled = 0;
+    canvas.addEventListener("transitioncancel", () => cancelled++);
+
+    const verdict = containerHeightIndependent(container, canvas);
+
+    expect(verdict).toBeNull();
+    expect(cancelled).toBe(0);
+    expect(
+      canvas
+        .getAnimations()
+        .some(
+          (a) => a.transitionProperty === "height" && a.playState === "running",
+        ),
+    ).toBe(true);
+    const midFlight = canvas.getBoundingClientRect().height;
+    expect(midFlight).toBeGreaterThan(0);
+    expect(midFlight).toBeLessThan(400);
+  });
+
+  it("restores styles and scroll even when measurement throws", () => {
+    // Finding: cleanup must be exception-safe.
+    const { container, canvas } = build({
+      parentCss: "display:block;height:300px",
+      height: "100%",
+    });
+    const before = canvas.style.cssText;
+    Object.defineProperty(container, "offsetHeight", {
+      get() {
+        throw new Error("layout backstop");
+      },
+    });
+
+    expect(() => containerHeightIndependent(container, canvas)).toThrow(
+      "layout backstop",
+    );
+
+    expect(canvas.style.cssText).toBe(before);
+  });
+
+  it("preserves scroll positions across shadow-root boundaries", () => {
+    // Finding: the ancestor walk must cross shadow roots via the host,
+    // or scrollers above a web component are never snapshotted.
+    const scroller = document.createElement("div");
+    scroller.style.cssText = "height:200px;overflow:auto";
+    const spacer = document.createElement("div");
+    spacer.style.cssText = "height:300px";
+    scroller.appendChild(spacer);
+    root.appendChild(scroller);
+
+    const host = document.createElement("div");
+    scroller.appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const parent = document.createElement("div");
+    parent.style.cssText = "display:block;width:400px";
+    shadow.appendChild(parent);
+    const container = document.createElement("div");
+    Object.assign(container.style, {
+      display: "block",
+      position: "relative",
+      width: "100%",
+      height: "100%",
+    });
+    parent.appendChild(container);
+    const canvas = document.createElement("canvas");
+    canvas.width = 1280;
+    canvas.height = 720;
+    Object.assign(canvas.style, {
+      display: "block",
+      width: "100%",
+      height: "225px",
+    });
+    container.appendChild(canvas);
+
+    scroller.scrollTop = 250;
+    expect(scroller.scrollTop).toBe(250);
+
+    containerHeightIndependent(container, canvas);
+
+    expect(scroller.scrollTop).toBe(250);
+  });
+
   it("preserves ancestor scroll positions", () => {
     // Finding: the 1px pass shrinks an overflowing ancestor's scroll
     // range, and the browser's scrollTop clamp survives restoration.

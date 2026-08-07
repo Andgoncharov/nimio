@@ -52,11 +52,15 @@ function buildPlayer({ parentCss, width, height, probeFn, parentVars }) {
   const probe = probeFn ?? containerHeightIndependent;
   const stats = { events: 0, applies: 0 };
 
-  // Mirrors _resizeAndRedraw.
+  // Mirrors _resizeAndRedraw (including the last-verdict cache for
+  // probes deferred by a running transition).
+  let lastVerdict;
   function applyLayout(rect) {
     let heightIndependent = false;
     if (layoutMgr.heightNeedsProbe()) {
-      heightIndependent = probe(container, canvas);
+      const probed = probe(container, canvas);
+      if (probed !== null) lastVerdict = probed;
+      heightIndependent = lastVerdict ?? false;
     }
     const cssProps = layoutMgr.fullLayout(
       rect.width,

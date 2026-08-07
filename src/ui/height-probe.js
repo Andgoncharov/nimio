@@ -15,45 +15,71 @@
 // content-sized no matter what the parent looks like.
 //
 // Side-effect containment:
+// - Measuring requires transition:none on the output, which would
+//   cancel every CSS transition currently running there and snap it to
+//   its end value. If one is running, the probe returns null instead
+//   of measuring - the caller keeps its previous verdict, the
+//   animation survives, and the resize events it produces re-run the
+//   probe once it has finished.
 // - transition:none stays pinned until one style change event has seen
 //   the restored height, so re-enabling a host transition cannot
 //   animate from the probe value (the before/after-change rule of the
-//   CSS transitions model). A host transition already running on the
-//   output when the probe fires is necessarily cancelled and snaps to
-//   its end value - unavoidable with any synchronous measurement.
-// - Ancestor scroll offsets are snapshotted first and re-applied last:
-//   the 1px pass shrinks ancestor scroll ranges, and an engine may
-//   clamp scrollTop during the forced layout and keep the clamped
-//   value (Chromium restores it within the same task, but that is not
+//   CSS transitions model).
+// - Ancestor scroll offsets - walking the composed tree through shadow
+//   root hosts - are snapshotted first and re-applied last: the 1px
+//   pass shrinks ancestor scroll ranges, and an engine may clamp
+//   scrollTop during the forced layout and keep the clamped value
+//   (Chromium restores it within the same task, but that is not
 //   guaranteed elsewhere).
+// - Restoration runs in a finally block, so styles and scroll come
+//   back even if a measurement throws.
 // - The synchronous flip never reaches a rendering step, so a
 //   ResizeObserver does not see it, and inline styles are restored
 //   verbatim.
 export function containerHeightIndependent(container, output) {
+  if (
+    typeof output.getAnimations === "function" &&
+    output
+      .getAnimations()
+      .some((a) => "transitionProperty" in a && a.playState === "running")
+  ) {
+    return null;
+  }
+
   const savedCss = output.style.cssText;
   const savedScrolls = [];
-  for (let el = container; el; el = el.parentElement) {
-    if (el.scrollTop || el.scrollLeft) {
-      savedScrolls.push([el, el.scrollTop, el.scrollLeft]);
+  for (
+    let node = container;
+    node instanceof Element;
+    node = node.parentElement ?? node.getRootNode().host ?? null
+  ) {
+    if (node.scrollTop || node.scrollLeft) {
+      savedScrolls.push([node, node.scrollTop, node.scrollLeft]);
     }
   }
 
-  output.style.setProperty("transition", "none", "important");
-  output.style.setProperty("height", "1px", "important");
-  const low = container.offsetHeight;
-  output.style.setProperty("height", "99999px", "important");
-  const high = container.offsetHeight;
-
-  output.style.cssText = savedCss;
-  output.style.setProperty("transition", "none", "important");
-  // Style change event with the steady height while transitions are
-  // still off; the next event then sees no height difference.
-  void output.offsetHeight;
-  output.style.cssText = savedCss;
-
-  for (const [el, top, left] of savedScrolls) {
-    el.scrollTop = top;
-    el.scrollLeft = left;
+  let low, high;
+  try {
+    output.style.setProperty("transition", "none", "important");
+    output.style.setProperty("height", "1px", "important");
+    low = container.offsetHeight;
+    output.style.setProperty("height", "99999px", "important");
+    high = container.offsetHeight;
+  } finally {
+    output.style.cssText = savedCss;
+    output.style.setProperty("transition", "none", "important");
+    try {
+      // Style change event with the steady height while transitions
+      // are still off; the next event then sees no height difference.
+      void output.offsetHeight;
+    } catch {
+      // measurement is best-effort during cleanup
+    }
+    output.style.cssText = savedCss;
+    for (const [node, top, left] of savedScrolls) {
+      node.scrollTop = top;
+      node.scrollLeft = left;
+    }
   }
   return low === high;
 }
