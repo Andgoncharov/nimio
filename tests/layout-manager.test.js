@@ -612,6 +612,14 @@ describe("UILayoutManager", () => {
         "1e2px",
         "1E-2em",
         "+.5rem",
+        "0",
+        "10svi",
+        "5dvb",
+        "3svmin",
+        "4lvmax",
+        "2rex",
+        "1.5rch",
+        "2ric",
       ]) {
         expect(
           new UILayoutManager("100%", height, "16:9").heightNeedsProbe(),

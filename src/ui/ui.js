@@ -656,6 +656,14 @@ export class UI {
           if (!this._container.isConnected) return;
           this._updateLayout(this._container.getBoundingClientRect());
         });
+        if (!this._probeRetryPending) {
+          // Nothing to wait for after all (the transitions vanished
+          // between reads) - measure again right away.
+          const reprobed = containerHeightIndependent(this._container, output);
+          if (reprobed !== null) {
+            this._heightIndependent = reprobed;
+          }
+        }
       }
       heightIndependent = this._heightIndependent ?? false;
     }

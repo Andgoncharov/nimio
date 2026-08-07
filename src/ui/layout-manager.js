@@ -186,7 +186,8 @@ export class UILayoutManager {
       return "intrinsic";
     }
     if (
-      /^\+?(\d+(\.\d+)?|\.\d+)(e[+-]?\d+)?(px|em|rem|ex|ch|cap|ic|lh|rlh|vw|vh|vmin|vmax|vi|vb|svw|svh|lvw|lvh|dvw|dvh|cqw|cqh|cqi|cqb|cqmin|cqmax|cm|mm|q|in|pt|pc)$/.test(
+      v === "0" ||
+      /^\+?(\d+(\.\d+)?|\.\d+)(e[+-]?\d+)?(px|em|rem|ex|ch|cap|ic|lh|rlh|rex|rch|rcap|ric|vw|vh|vmin|vmax|vi|vb|svw|svh|svi|svb|svmin|svmax|lvw|lvh|lvi|lvb|lvmin|lvmax|dvw|dvh|dvi|dvb|dvmin|dvmax|cqw|cqh|cqi|cqb|cqmin|cqmax|cm|mm|q|in|pt|pc)$/.test(
         v,
       )
     ) {

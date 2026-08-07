@@ -71,6 +71,11 @@ function buildPlayer({ parentCss, width, height, probeFn, parentVars }) {
           if (!container.isConnected) return;
           applyLayout(container.getBoundingClientRect());
         });
+        if (!retryPending) {
+          // Nothing to wait for after all - measure again right away.
+          const reprobed = probe(container, canvas);
+          if (reprobed !== null) lastVerdict = reprobed;
+        }
       }
       heightIndependent = lastVerdict ?? false;
     }
@@ -262,6 +267,37 @@ describe("VOD layout convergence", () => {
 
     const recovered = await until(() => player.canvas.style.height === "100%");
     expect(recovered).toBe(true);
+  });
+
+  it("re-measures immediately when a deferral finds no transition to wait for", async () => {
+    // Contract completeness: if the settle hook reports nothing to
+    // wait for (transitions vanished between reads - only reachable
+    // with instrumentation for native transitions), the caller must
+    // measure again right away instead of keeping the stale verdict.
+    // The deferral is injected on the LAST resize event, so nothing
+    // later would rescue a stale verdict.
+    let deferNext = false;
+    player = buildPlayer({
+      parentCss: "display:block;width:800px",
+      width: "100%",
+      height: "100%",
+      probeFn: (container, output) => {
+        if (deferNext) {
+          deferNext = false;
+          return null;
+        }
+        return containerHeightIndependent(container, output);
+      },
+    });
+    expect(await settles(player.stats)).toBe(true);
+    expect(player.canvas.style.height).toBe("auto"); // content-sized verdict
+
+    deferNext = true;
+    player.parent.style.height = "300px"; // correct verdict flips
+
+    const recovered = await until(() => player.canvas.style.height === "100%");
+    expect(recovered).toBe(true);
+    expect(deferNext).toBe(false);
   });
 
   it("self-check: a wrong independent verdict makes the harness detect oscillation", async () => {
