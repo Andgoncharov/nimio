@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MODE } from "@/shared/values";
 import { UILayoutManager } from "@/ui/layout-manager";
-import { probeParentHeightDefinite } from "@/ui/height-probe";
+import { containerHeightIndependent } from "@/ui/height-probe";
 
 // Regression tests for the VOD flicker (#86): drive the production
 // UILayoutManager and height probe through a real ResizeObserver in a
@@ -14,9 +14,12 @@ import { probeParentHeightDefinite } from "@/ui/height-probe";
 const FRAME = { width: 1280, height: 720 };
 const AR = FRAME.width / FRAME.height;
 
-function buildPlayer({ parentCss, width, height, probeFn }) {
+function buildPlayer({ parentCss, width, height, probeFn, parentVars }) {
   const parent = document.createElement("div");
   parent.style.cssText = parentCss;
+  for (const [name, value] of Object.entries(parentVars ?? {})) {
+    parent.style.setProperty(name, value);
+  }
   document.body.appendChild(parent);
 
   // Mirrors the container setup in the UI constructor.
@@ -46,14 +49,14 @@ function buildPlayer({ parentCss, width, height, probeFn }) {
   layoutMgr.setFrameSize(FRAME.width, FRAME.height);
   Object.assign(container.style, layoutMgr.containerLayout(false));
 
-  const probe = probeFn ?? probeParentHeightDefinite;
+  const probe = probeFn ?? containerHeightIndependent;
   const stats = { events: 0, applies: 0 };
 
   // Mirrors _resizeAndRedraw.
   function applyLayout(rect) {
-    let parentHeightDefinite = false;
-    if (layoutMgr.heightNeedsParentProbe()) {
-      parentHeightDefinite = probe(container.parentElement);
+    let heightIndependent = false;
+    if (layoutMgr.heightNeedsProbe()) {
+      heightIndependent = probe(container, canvas);
     }
     const cssProps = layoutMgr.fullLayout(
       rect.width,
@@ -61,7 +64,7 @@ function buildPlayer({ parentCss, width, height, probeFn }) {
       MODE.VOD,
       false,
       false,
-      parentHeightDefinite,
+      heightIndependent,
     );
     if (cssProps) {
       container.style.width = cssProps.container.width;
@@ -191,7 +194,24 @@ describe("VOD layout convergence", () => {
     expect(player.canvas.offsetWidth).toBeCloseTo(300 * AR, 0);
   });
 
-  it("self-check: a wrong definite verdict makes the harness detect oscillation", async () => {
+  it("converges with an auto-valued var() height in a fixed-height parent", async () => {
+    // Regression for the var() finding: the parent is definite, but the
+    // variable resolves to auto, so the container is content-sized and
+    // the rect fit would oscillate.
+    player = buildPlayer({
+      parentCss: "display:block;width:800px;height:300px",
+      parentVars: { "--player-height": "auto" },
+      width: "100%",
+      height: "var(--player-height)",
+    });
+
+    expect(await settles(player.stats)).toBe(true);
+    expect(player.stats.applies).toBeLessThanOrEqual(8);
+    expect(player.canvas.style.width).toBe("100%");
+    expect(player.canvas.style.height).toBe("auto");
+  });
+
+  it("self-check: a wrong independent verdict makes the harness detect oscillation", async () => {
     // Simulates the pre-fix behavior (rect fit despite an unresolvable
     // percentage) and proves this harness can catch it: if the guard
     // regresses, the convergence tests above fail the same way.

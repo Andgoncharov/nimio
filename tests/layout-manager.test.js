@@ -310,9 +310,10 @@ describe("UILayoutManager", () => {
       // The flicker guard must key on definiteness, not on the literal
       // "auto": a percentage height inside a parent with no definite
       // height behaves as auto, so the rect-based fit feeds back and
-      // oscillates the same way. Definiteness of a percentage is decided
-      // by the caller (a DOM probe in ui.js) and passed in as the
-      // parentHeightDefinite flag - the last fullLayout argument below.
+      // oscillates the same way. Context-dependent heights (%, var(),
+      // inherit) are resolved by the caller (a DOM probe in ui.js) and
+      // passed in as the heightIndependent flag - the last fullLayout
+      // argument below.
 
       it("uses width as the constraint for a percentage height when the parent height is indefinite", () => {
         const ui = new UILayoutManager("100%", "100%", "16:9");
@@ -552,50 +553,46 @@ describe("UILayoutManager", () => {
     });
   });
 
-  describe("heightNeedsParentProbe", () => {
-    // ui.js runs a DOM probe against the container's parent only when
-    // the configured height is percentage-based - the sole case whose
-    // definiteness the layout manager can't classify on its own.
+  describe("heightNeedsProbe", () => {
+    // ui.js runs a DOM probe (does the container height follow the
+    // output?) only for context-dependent heights - %, var(), inherit -
+    // which the layout manager can't classify on its own.
 
     it("is false for intrinsic heights", () => {
       expect(
-        new UILayoutManager("100%", "auto", "16:9").heightNeedsParentProbe(),
+        new UILayoutManager("100%", "auto", "16:9").heightNeedsProbe(),
       ).toBe(false);
       expect(
-        new UILayoutManager(
-          "100%",
-          "fit-content",
-          "16:9",
-        ).heightNeedsParentProbe(),
+        new UILayoutManager("100%", "fit-content", "16:9").heightNeedsProbe(),
       ).toBe(false);
       expect(
-        new UILayoutManager("100%", undefined, "16:9").heightNeedsParentProbe(),
+        new UILayoutManager("100%", undefined, "16:9").heightNeedsProbe(),
       ).toBe(false);
     });
 
     it("is false for definite heights", () => {
+      expect(new UILayoutManager("100%", 480, "16:9").heightNeedsProbe()).toBe(
+        false,
+      );
       expect(
-        new UILayoutManager("100%", 480, "16:9").heightNeedsParentProbe(),
-      ).toBe(false);
-      expect(
-        new UILayoutManager("100%", "50vh", "16:9").heightNeedsParentProbe(),
+        new UILayoutManager("100%", "50vh", "16:9").heightNeedsProbe(),
       ).toBe(false);
     });
 
     it("is false for css-wide keywords and keyword case variants", () => {
       for (const height of ["AUTO", " auto ", "initial", "unset", "revert"]) {
         expect(
-          new UILayoutManager("100%", height, "16:9").heightNeedsParentProbe(),
+          new UILayoutManager("100%", height, "16:9").heightNeedsProbe(),
         ).toBe(false);
       }
     });
 
     it("is true for percentage heights", () => {
       expect(
-        new UILayoutManager("100%", "100%", "16:9").heightNeedsParentProbe(),
+        new UILayoutManager("100%", "100%", "16:9").heightNeedsProbe(),
       ).toBe(true);
       expect(
-        new UILayoutManager("100%", " 100% ", "16:9").heightNeedsParentProbe(),
+        new UILayoutManager("100%", " 100% ", "16:9").heightNeedsProbe(),
       ).toBe(true);
     });
 
@@ -603,7 +600,7 @@ describe("UILayoutManager", () => {
       // inherit copies the parent's computed height, so its definiteness
       // is exactly what the parent probe measures.
       expect(
-        new UILayoutManager("100%", "inherit", "16:9").heightNeedsParentProbe(),
+        new UILayoutManager("100%", "inherit", "16:9").heightNeedsProbe(),
       ).toBe(true);
     });
 
@@ -615,7 +612,7 @@ describe("UILayoutManager", () => {
           "100%",
           "var(--player-height)",
           "16:9",
-        ).heightNeedsParentProbe(),
+        ).heightNeedsProbe(),
       ).toBe(true);
     });
 
@@ -625,14 +622,14 @@ describe("UILayoutManager", () => {
           "100%",
           "calc(100% - 40px)",
           "16:9",
-        ).heightNeedsParentProbe(),
+        ).heightNeedsProbe(),
       ).toBe(true);
       expect(
         new UILayoutManager(
           "100%",
           "min(100%, 480px)",
           "16:9",
-        ).heightNeedsParentProbe(),
+        ).heightNeedsProbe(),
       ).toBe(true);
     });
 
@@ -640,7 +637,7 @@ describe("UILayoutManager", () => {
       const ui = new UILayoutManager();
       ui.setFrameSize(1920, 1080);
 
-      expect(ui.heightNeedsParentProbe()).toBe(false);
+      expect(ui.heightNeedsProbe()).toBe(false);
     });
   });
 

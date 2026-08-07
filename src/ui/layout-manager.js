@@ -59,7 +59,7 @@ export class UILayoutManager {
     };
   }
 
-  heightNeedsParentProbe() {
+  heightNeedsProbe() {
     return this._cssSizeKind(this._cssHeight) === "relative";
   }
 
@@ -69,7 +69,7 @@ export class UILayoutManager {
     mode,
     isFullscreen,
     isMediaElementMode,
-    parentHeightDefinite = false,
+    heightIndependent = false,
   ) {
     if (!this._ar || this._paused) return null;
 
@@ -89,7 +89,7 @@ export class UILayoutManager {
     } else if (mode === MODE.VOD || isMediaElementMode) {
       const widthAuto = this._cssSizeKind(this._cssWidth) === "intrinsic";
       const heightIndefinite =
-        !isFullscreen && this._isHeightIndefinite(parentHeightDefinite);
+        !isFullscreen && this._isHeightIndefinite(heightIndependent);
       if (heightIndefinite) {
         // With an indefinite HEIGHT (auto, a content-based keyword, or a
         // percentage against a parent with no definite height) the
@@ -168,13 +168,11 @@ export class UILayoutManager {
   // "intrinsic" - computes to a content-based height, always indefinite
   // (auto, fit-content and friends, and the css-wide keywords that fall
   // back to auto for height);
-  // "relative" - definite only when the parent height is definite, which
-  // the caller resolves with a DOM probe: percentages by CSS rule;
-  // inherit because it copies the parent's computed height, whose
-  // definiteness is exactly what the probe measures; var() because it
-  // can hide any value and the probe branch is stable either way (at
-  // worst a definite var() in an auto-height parent loses the letterbox
-  // fit, while guessing "definite" could reintroduce the oscillation);
+  // "relative" - context-dependent, so the caller resolves it with a
+  // DOM probe that measures whether the container's height actually
+  // follows the output (percentages depend on the ancestor chain,
+  // inherit copies the parent's computed height, and var() can hide
+  // any value including auto);
   // "definite" - an absolute length, always trustworthy for the rect fit.
   _cssSizeKind(value) {
     if (!value) return "intrinsic";
@@ -192,10 +190,10 @@ export class UILayoutManager {
     return "definite";
   }
 
-  _isHeightIndefinite(parentHeightDefinite) {
+  _isHeightIndefinite(heightIndependent) {
     const kind = this._cssSizeKind(this._cssHeight);
     if (kind === "intrinsic") return true;
-    if (kind === "relative") return !parentHeightDefinite;
+    if (kind === "relative") return !heightIndependent;
     return false;
   }
 

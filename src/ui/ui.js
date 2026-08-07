@@ -10,7 +10,7 @@ import { UIThumbnailPreview } from "./thumbnail-preview";
 import { UICaptionController } from "./caption-controller";
 import { UICaptionList } from "./caption-list";
 import { UILayoutManager } from "./layout-manager";
-import { probeParentHeightDefinite } from "./height-probe";
+import { containerHeightIndependent } from "./height-probe";
 import { UiPip } from "./ui-pip";
 import { MODE } from "@/shared/values";
 import OffscreenRendererWorker from "./offscreen-renderer-worker.js?worker";
@@ -627,9 +627,19 @@ export class UI {
 
   _resizeAndRedraw(rect, pipMode) {
     const isFullscreen = pipMode || this._isPlayerFullscreen();
-    let parentHeightDefinite = false;
-    if (!isFullscreen && this._layoutMgr.heightNeedsParentProbe()) {
-      parentHeightDefinite = this._isParentHeightDefinite();
+    const canvasOutput = this._mode === MODE.LIVE && !this._mediaElementMode;
+    const output = canvasOutput ? this._canvas : this._mediaElement;
+    let heightIndependent = false;
+    // The probe only matters on the rect-fit branch (VOD or media
+    // element mode) and measures the main container - fullscreen and
+    // PiP are viewport-sized.
+    if (
+      !isFullscreen &&
+      !canvasOutput &&
+      output &&
+      this._layoutMgr.heightNeedsProbe()
+    ) {
+      heightIndependent = containerHeightIndependent(this._container, output);
     }
     let cssProps = this._layoutMgr.fullLayout(
       rect.width,
@@ -637,14 +647,12 @@ export class UI {
       this._mode,
       isFullscreen,
       this._mediaElementMode,
-      parentHeightDefinite,
+      heightIndependent,
     );
     if (cssProps) {
       let container = pipMode ? this._pipContainer : this._container;
       container.style.width = cssProps.container.width;
       container.style.height = cssProps.container.height;
-      const canvasOutput = this._mode === MODE.LIVE && !this._mediaElementMode;
-      let output = canvasOutput ? this._canvas : this._mediaElement;
       output.style.width = cssProps.output.width;
       output.style.height = cssProps.output.height;
       output.style["object-fit"] = cssProps.output["object-fit"];
@@ -670,12 +678,6 @@ export class UI {
       }
       this._updateCanvasSize();
     }
-  }
-
-  _isParentHeightDefinite() {
-    const parent = this._container.parentElement;
-    if (!parent) return false;
-    return probeParentHeightDefinite(parent);
   }
 
   _updateCanvasSize() {
