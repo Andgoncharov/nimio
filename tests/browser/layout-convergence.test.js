@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MODE } from "@/shared/values";
 import { UILayoutManager } from "@/ui/layout-manager";
-import { containerHeightIndependent } from "@/ui/height-probe";
+import {
+  containerHeightIndependent,
+  whenOutputTransitionsSettled,
+} from "@/ui/height-probe";
 
 // Regression tests for the VOD flicker (#86): drive the production
 // UILayoutManager and height probe through a real ResizeObserver in a
@@ -52,14 +55,23 @@ function buildPlayer({ parentCss, width, height, probeFn, parentVars }) {
   const probe = probeFn ?? containerHeightIndependent;
   const stats = { events: 0, applies: 0 };
 
-  // Mirrors _resizeAndRedraw (including the last-verdict cache for
-  // probes deferred by a running transition).
+  // Mirrors _resizeAndRedraw (including the last-verdict cache and the
+  // settled-transitions retry for deferred probes).
   let lastVerdict;
+  let retryPending = false;
   function applyLayout(rect) {
     let heightIndependent = false;
     if (layoutMgr.heightNeedsProbe()) {
       const probed = probe(container, canvas);
-      if (probed !== null) lastVerdict = probed;
+      if (probed !== null) {
+        lastVerdict = probed;
+      } else if (!retryPending) {
+        retryPending = whenOutputTransitionsSettled(canvas, () => {
+          retryPending = false;
+          if (!container.isConnected) return;
+          applyLayout(container.getBoundingClientRect());
+        });
+      }
       heightIndependent = lastVerdict ?? false;
     }
     const cssProps = layoutMgr.fullLayout(
@@ -111,6 +123,16 @@ function buildPlayer({ parentCss, width, height, probeFn, parentVars }) {
       parent.remove();
     },
   };
+}
+
+// Polls until fn() is truthy or the timeout elapses.
+async function until(fn, timeout = 3000) {
+  const start = performance.now();
+  while (performance.now() - start < timeout) {
+    if (fn()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !!fn();
 }
 
 // Resolves true once no resize events arrive for quietMs; false if the
@@ -213,6 +235,33 @@ describe("VOD layout convergence", () => {
     expect(player.stats.applies).toBeLessThanOrEqual(8);
     expect(player.canvas.style.width).toBe("100%");
     expect(player.canvas.style.height).toBe("auto");
+  });
+
+  it("re-probes after a deferring transition ends (stale verdict recovery)", async () => {
+    // Finding: with an opacity fade live on the output, probes defer
+    // and there are no resize events to retry them - the verdict must
+    // recover through the transitions-settled hook once the fade ends.
+    player = buildPlayer({
+      parentCss: "display:block;width:800px",
+      width: "100%",
+      height: "100%",
+    });
+    expect(await settles(player.stats)).toBe(true);
+    expect(player.canvas.style.height).toBe("auto"); // content-sized verdict
+
+    // Start an opacity fade, then give the parent a definite height
+    // while it runs: the correct verdict flips to independent, but the
+    // probe cannot measure until the fade finishes.
+    player.canvas.style.transition = "opacity 0.3s linear";
+    void player.canvas.offsetHeight;
+    player.canvas.style.opacity = "0.5";
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+    player.parent.style.height = "300px";
+
+    const recovered = await until(() => player.canvas.style.height === "100%");
+    expect(recovered).toBe(true);
   });
 
   it("self-check: a wrong independent verdict makes the harness detect oscillation", async () => {

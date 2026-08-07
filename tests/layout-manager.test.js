@@ -602,17 +602,28 @@ describe("UILayoutManager", () => {
     });
 
     it("is false for definite heights", () => {
-      for (const height of [480, "50vh", "480px", ".5em", "1.5rem"]) {
+      for (const height of [
+        480,
+        "50vh",
+        "480px",
+        ".5em",
+        "1.5rem",
+        "+1px",
+        "1e2px",
+        "1E-2em",
+        "+.5rem",
+      ]) {
         expect(
           new UILayoutManager("100%", height, "16:9").heightNeedsProbe(),
         ).toBe(false);
       }
     });
 
-    it("is true for malformed numeric lengths", () => {
-      // Browsers reject these declarations, leaving the height
-      // effectively auto - they must be measured, not trusted.
-      for (const height of ["1.2.3px", ".px", "....vh", "1..5em"]) {
+    it("is true for malformed or negative numeric lengths", () => {
+      // Browsers reject these declarations (negative heights are
+      // invalid), leaving the height effectively auto - they must be
+      // measured, not trusted.
+      for (const height of ["1.2.3px", ".px", "....vh", "1..5em", "-1px"]) {
         expect(
           new UILayoutManager("100%", height, "16:9").heightNeedsProbe(),
         ).toBe(true);

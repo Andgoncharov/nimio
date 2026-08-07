@@ -16,33 +16,30 @@
 //
 // Side-effect containment:
 // - Measuring requires transition:none on the output, which would
-//   cancel every CSS transition currently running there and snap it to
-//   its end value. If one is running, the probe returns null instead
-//   of measuring - the caller keeps its previous verdict, the
-//   animation survives, and the resize events it produces re-run the
-//   probe once it has finished.
+//   cancel every CSS transition currently live there - running OR
+//   paused - and snap it to its end value. If any exists, the probe
+//   returns null instead of measuring; the caller keeps its previous
+//   verdict and uses whenOutputTransitionsSettled() to re-measure once
+//   they finish (a transition that stays paused forever keeps the
+//   stale verdict - the only alternative would be destroying it).
 // - transition:none stays pinned until one style change event has seen
 //   the restored height, so re-enabling a host transition cannot
 //   animate from the probe value (the before/after-change rule of the
 //   CSS transitions model).
-// - Ancestor scroll offsets - walking the composed tree through shadow
-//   root hosts - are snapshotted first and re-applied last: the 1px
-//   pass shrinks ancestor scroll ranges, and an engine may clamp
-//   scrollTop during the forced layout and keep the clamped value
-//   (Chromium restores it within the same task, but that is not
-//   guaranteed elsewhere).
+// - Ancestor scroll offsets - walking the FLAT tree: slotted content
+//   steps into its assigned slot's shadow-tree ancestry, and shadow
+//   roots step out through their host - are snapshotted first and
+//   re-applied last: the 1px pass shrinks ancestor scroll ranges, and
+//   an engine may clamp scrollTop during the forced layout and keep
+//   the clamped value (Chromium restores it within the same task, but
+//   that is not guaranteed elsewhere).
 // - Restoration runs in a finally block, so styles and scroll come
 //   back even if a measurement throws.
 // - The synchronous flip never reaches a rendering step, so a
 //   ResizeObserver does not see it, and inline styles are restored
 //   verbatim.
 export function containerHeightIndependent(container, output) {
-  if (
-    typeof output.getAnimations === "function" &&
-    output
-      .getAnimations()
-      .some((a) => "transitionProperty" in a && a.playState === "running")
-  ) {
+  if (outputTransitions(output).length) {
     return null;
   }
 
@@ -51,7 +48,8 @@ export function containerHeightIndependent(container, output) {
   for (
     let node = container;
     node instanceof Element;
-    node = node.parentElement ?? node.getRootNode().host ?? null
+    node =
+      node.assignedSlot ?? node.parentElement ?? node.getRootNode().host ?? null
   ) {
     if (node.scrollTop || node.scrollLeft) {
       savedScrolls.push([node, node.scrollTop, node.scrollLeft]);
@@ -82,4 +80,23 @@ export function containerHeightIndependent(container, output) {
     }
   }
   return low === high;
+}
+
+function outputTransitions(output) {
+  if (typeof output.getAnimations !== "function") return [];
+  return output.getAnimations().filter((a) => "transitionProperty" in a);
+}
+
+// Retry hook for a deferred probe: invokes callback once every CSS
+// transition currently live on the output has finished or been
+// cancelled, and returns true. Returns false without scheduling when
+// there is nothing to wait for (the caller can probe again right
+// away). Without this, a transition that never resizes the container -
+// an opacity fade, say - would produce no ResizeObserver events and a
+// deferred verdict would stay stale forever.
+export function whenOutputTransitionsSettled(output, callback) {
+  const transitions = outputTransitions(output);
+  if (!transitions.length) return false;
+  Promise.allSettled(transitions.map((t) => t.finished)).then(callback);
+  return true;
 }

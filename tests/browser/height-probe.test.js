@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { containerHeightIndependent } from "@/ui/height-probe";
+import {
+  containerHeightIndependent,
+  whenOutputTransitionsSettled,
+} from "@/ui/height-probe";
 
 // Exercises the production probe against a real layout engine. The
 // probe flips the existing output element's inline height and checks
@@ -389,6 +392,41 @@ describe("containerHeightIndependent", () => {
     expect(midFlight).toBeLessThan(400);
   });
 
+  it("defers for a paused transition and leaves it intact", async () => {
+    // Finding: a paused transition has playState "paused", but pinning
+    // transition:none destroys it just the same - presence of any
+    // CSSTransition must defer the probe.
+    const { container, canvas } = build({
+      parentCss: "display:block",
+      parentClass: "hostile-transition",
+      height: "100%",
+    });
+    canvas.style.height = "50px";
+    void canvas.offsetHeight;
+    canvas.style.height = "400px";
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+    const transition = canvas
+      .getAnimations()
+      .find((a) => a.transitionProperty === "height");
+    expect(transition).toBeDefined();
+    transition.pause();
+    let cancelled = 0;
+    canvas.addEventListener("transitioncancel", () => cancelled++);
+
+    const verdict = containerHeightIndependent(container, canvas);
+
+    expect(verdict).toBeNull();
+    expect(cancelled).toBe(0);
+    expect(
+      canvas.getAnimations().some((a) => a.transitionProperty === "height"),
+    ).toBe(true);
+    const paused = canvas.getBoundingClientRect().height;
+    expect(paused).toBeGreaterThan(0);
+    expect(paused).toBeLessThan(400);
+  });
+
   it("restores styles and scroll even when measurement throws", () => {
     // Finding: cleanup must be exception-safe.
     const { container, canvas } = build({
@@ -407,6 +445,83 @@ describe("containerHeightIndependent", () => {
     );
 
     expect(canvas.style.cssText).toBe(before);
+  });
+
+  it("signals settlement of output transitions so deferred probes can retry", async () => {
+    // Finding: an opacity fade defers the probe but never resizes the
+    // container, so no ResizeObserver event retries it - the caller
+    // needs an explicit signal when the transitions are done.
+    const { container, canvas } = build({
+      parentCss: "display:block;height:300px",
+      height: "100%",
+    });
+    canvas.style.transition = "opacity 0.15s linear";
+    void canvas.offsetHeight;
+    canvas.style.opacity = "0.5";
+    await new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)),
+    );
+    expect(containerHeightIndependent(container, canvas)).toBeNull();
+
+    const settled = new Promise((resolve) => {
+      expect(whenOutputTransitionsSettled(canvas, resolve)).toBe(true);
+    });
+    await settled;
+
+    expect(containerHeightIndependent(container, canvas)).toBe(true);
+  });
+
+  it("returns false from the settle hook when nothing is transitioning", () => {
+    const { canvas } = build({
+      parentCss: "display:block;height:300px",
+      height: "100%",
+    });
+
+    expect(whenOutputTransitionsSettled(canvas, () => {})).toBe(false);
+  });
+
+  it("preserves scroll positions around a slot inside a shadow tree", () => {
+    // Finding: slotted content must walk into its assigned slot's
+    // shadow-tree ancestry - parentElement alone skips a scroller
+    // wrapping the slot.
+    const host = document.createElement("div");
+    root.appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const scroller = document.createElement("div");
+    scroller.style.cssText = "height:200px;overflow:auto";
+    const spacer = document.createElement("div");
+    spacer.style.cssText = "height:300px";
+    scroller.appendChild(spacer);
+    scroller.appendChild(document.createElement("slot"));
+    shadow.appendChild(scroller);
+
+    const parent = document.createElement("div");
+    parent.style.cssText = "display:block;width:400px";
+    host.appendChild(parent); // slotted into the scroller
+    const container = document.createElement("div");
+    Object.assign(container.style, {
+      display: "block",
+      position: "relative",
+      width: "100%",
+      height: "100%",
+    });
+    parent.appendChild(container);
+    const canvas = document.createElement("canvas");
+    canvas.width = 1280;
+    canvas.height = 720;
+    Object.assign(canvas.style, {
+      display: "block",
+      width: "100%",
+      height: "225px",
+    });
+    container.appendChild(canvas);
+
+    scroller.scrollTop = 250;
+    expect(scroller.scrollTop).toBe(250);
+
+    containerHeightIndependent(container, canvas);
+
+    expect(scroller.scrollTop).toBe(250);
   });
 
   it("preserves scroll positions across shadow-root boundaries", () => {

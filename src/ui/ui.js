@@ -10,7 +10,10 @@ import { UIThumbnailPreview } from "./thumbnail-preview";
 import { UICaptionController } from "./caption-controller";
 import { UICaptionList } from "./caption-list";
 import { UILayoutManager } from "./layout-manager";
-import { containerHeightIndependent } from "./height-probe";
+import {
+  containerHeightIndependent,
+  whenOutputTransitionsSettled,
+} from "./height-probe";
 import { UiPip } from "./ui-pip";
 import { MODE } from "@/shared/values";
 import OffscreenRendererWorker from "./offscreen-renderer-worker.js?worker";
@@ -641,9 +644,18 @@ export class UI {
     ) {
       const probed = containerHeightIndependent(this._container, output);
       if (probed !== null) {
-        // null means the probe deferred (a transition is running on
-        // the output); keep the last verdict until it can re-measure.
         this._heightIndependent = probed;
+      } else if (!this._probeRetryPending) {
+        // The probe deferred because a CSS transition is live on the
+        // output. Keep the last verdict for now, and re-run the layout
+        // once the transitions settle - a transition that never
+        // resizes the container (an opacity fade) produces no resize
+        // events, so without this the stale verdict would stick.
+        this._probeRetryPending = whenOutputTransitionsSettled(output, () => {
+          this._probeRetryPending = false;
+          if (!this._container.isConnected) return;
+          this._updateLayout(this._container.getBoundingClientRect());
+        });
       }
       heightIndependent = this._heightIndependent ?? false;
     }
