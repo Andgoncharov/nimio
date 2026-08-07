@@ -511,6 +511,37 @@ describe("UILayoutManager", () => {
         expect(definite.output.height).toBe("100%");
       });
 
+      it("resolves env() and calc-size() heights through the probe flag", () => {
+        for (const height of [
+          "env(safe-area-inset-bottom, auto)",
+          "calc-size(auto, size)",
+        ]) {
+          const ui = new UILayoutManager("100%", height, "16:9");
+
+          const dependent = ui.fullLayout(
+            1000,
+            563,
+            MODE.VOD,
+            false,
+            false,
+            false,
+          );
+          expect(dependent.output.width).toBe("100%");
+          expect(dependent.output.height).toBe("auto");
+
+          const independent = ui.fullLayout(
+            2000,
+            1000,
+            MODE.VOD,
+            false,
+            false,
+            true,
+          );
+          expect(independent.output.width).toBe("auto");
+          expect(independent.output.height).toBe("100%");
+        }
+      });
+
       it("keeps an intrinsic width for content-based width keywords", () => {
         // A fit-content width is sized by the output too; forcing
         // width:100% against it would be cyclic.
@@ -614,6 +645,23 @@ describe("UILayoutManager", () => {
           "16:9",
         ).heightNeedsProbe(),
       ).toBe(true);
+    });
+
+    it("is true for any syntax that is not a plain absolute length", () => {
+      // Only positively recognized absolute lengths skip the probe -
+      // env() can resolve to its fallback (possibly auto), calc-size()
+      // keeps intrinsic sizing behavior, and future syntax is unknown.
+      for (const height of [
+        "env(safe-area-inset-bottom, auto)",
+        "calc-size(auto, size)",
+        "calc(50vh - 10px)",
+        "min(10vh, 200px)",
+        "foo(12px)",
+      ]) {
+        expect(
+          new UILayoutManager("100%", height, "16:9").heightNeedsProbe(),
+        ).toBe(true);
+      }
     });
 
     it("is true for functions containing a percentage", () => {

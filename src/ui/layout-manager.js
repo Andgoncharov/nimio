@@ -168,12 +168,13 @@ export class UILayoutManager {
   // "intrinsic" - computes to a content-based height, always indefinite
   // (auto, fit-content and friends, and the css-wide keywords that fall
   // back to auto for height);
-  // "relative" - context-dependent, so the caller resolves it with a
-  // DOM probe that measures whether the container's height actually
-  // follows the output (percentages depend on the ancestor chain,
-  // inherit copies the parent's computed height, and var() can hide
-  // any value including auto);
-  // "definite" - an absolute length, always trustworthy for the rect fit.
+  // "definite" - a positively recognized plain absolute length, the
+  // only syntax trusted without measurement;
+  // "relative" - everything else is context-dependent or unknown
+  // (%, var(), env() with a possibly-auto fallback, calc(),
+  // calc-size(), inherit, future grammar) and is resolved by the DOM
+  // probe in ui.js, which measures whether the container's height
+  // actually follows the output.
   _cssSizeKind(value) {
     if (!value) return "intrinsic";
     const v = String(value).trim().toLowerCase();
@@ -184,10 +185,14 @@ export class UILayoutManager {
     ) {
       return "intrinsic";
     }
-    if (v.includes("%") || v.includes("var(") || v === "inherit") {
-      return "relative";
+    if (
+      /^[\d.]+(px|em|rem|ex|ch|cap|ic|lh|rlh|vw|vh|vmin|vmax|vi|vb|svw|svh|lvw|lvh|dvw|dvh|cqw|cqh|cqi|cqb|cqmin|cqmax|cm|mm|q|in|pt|pc)$/.test(
+        v,
+      )
+    ) {
+      return "definite";
     }
-    return "definite";
+    return "relative";
   }
 
   _isHeightIndefinite(heightIndependent) {

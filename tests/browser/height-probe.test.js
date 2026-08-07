@@ -216,6 +216,32 @@ describe("containerHeightIndependent", () => {
       { parentCss: "display:block", height: "calc(100% - 40px)" },
       false,
     ],
+    // Finding: env() with a fallback can resolve to auto, and
+    // calc-size(auto, ...) keeps intrinsic sizing - both must be
+    // measured, not assumed definite. (If the browser rejects the
+    // syntax the height falls back to auto, so the expected verdict
+    // holds either way.)
+    [
+      "env() falling back to auto in a 300px parent",
+      {
+        parentCss: "display:block;height:300px",
+        height: "env(missing-env-var, auto)",
+      },
+      false,
+    ],
+    [
+      "calc-size(auto, size) in a 300px parent",
+      {
+        parentCss: "display:block;height:300px",
+        height: "calc-size(auto, size)",
+      },
+      false,
+    ],
+    [
+      "calc(50vh - 10px) in a heightless parent",
+      { parentCss: "display:block", height: "calc(50vh - 10px)" },
+      true,
+    ],
     // Finding: pseudo-element rules on empty children fooled the
     // element-insertion probe; nothing is inserted now.
     [
@@ -299,5 +325,64 @@ describe("containerHeightIndependent", () => {
     containerHeightIndependent(container, canvas);
 
     expect(canvas.style.cssText).toBe(before);
+  });
+
+  it("does not start a host transition when restoring the output", async () => {
+    // Finding: restoring cssText with a host height transition active
+    // made the next style change animate from the 99999px probe value.
+    const { container, canvas } = build({
+      parentCss: "display:block",
+      parentClass: "hostile-transition",
+      height: "100%",
+    });
+    const steady = canvas.offsetHeight;
+    let transitions = 0;
+    canvas.addEventListener("transitionstart", () => transitions++);
+
+    containerHeightIndependent(container, canvas);
+
+    expect(canvas.offsetHeight).toBe(steady);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(transitions).toBe(0);
+    expect(canvas.offsetHeight).toBe(steady);
+  });
+
+  it("preserves ancestor scroll positions", () => {
+    // Finding: the 1px pass shrinks an overflowing ancestor's scroll
+    // range, and the browser's scrollTop clamp survives restoration.
+    const scroller = document.createElement("div");
+    scroller.style.cssText = "height:200px;overflow:auto";
+    const spacer = document.createElement("div");
+    spacer.style.cssText = "height:300px";
+    scroller.appendChild(spacer);
+    root.appendChild(scroller);
+
+    const parent = document.createElement("div");
+    parent.style.cssText = "display:block;width:400px";
+    scroller.appendChild(parent);
+    const container = document.createElement("div");
+    Object.assign(container.style, {
+      display: "block",
+      position: "relative",
+      width: "100%",
+      height: "100%",
+    });
+    parent.appendChild(container);
+    const canvas = document.createElement("canvas");
+    canvas.width = 1280;
+    canvas.height = 720;
+    Object.assign(canvas.style, {
+      display: "block",
+      width: "100%",
+      height: "225px",
+    });
+    container.appendChild(canvas);
+
+    scroller.scrollTop = 250;
+    expect(scroller.scrollTop).toBe(250);
+
+    containerHeightIndependent(container, canvas);
+
+    expect(scroller.scrollTop).toBe(250);
   });
 });
