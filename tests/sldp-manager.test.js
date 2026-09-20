@@ -112,4 +112,17 @@ describe("SLDPManager closing stop", () => {
     expect(stopMsg).toBeTruthy();
     expect(stopMsg.data.sns.sort()).toEqual(["1", "2"]);
   });
+
+  it("cancelKeepAlive() stops the loop even when the transport is disconnected", () => {
+    mgr.keepAliveConnection();
+    vi.advanceTimersByTime(10000);
+    expect(transport.sent.filter(isKeepAlive).length).toBeGreaterThan(0);
+
+    transport.connected = false;   // socket already dropped
+    transport.sent.length = 0;
+    mgr.cancelKeepAlive();
+
+    vi.advanceTimersByTime(60000);
+    expect(transport.sent).toHaveLength(0);
+  });
 });
