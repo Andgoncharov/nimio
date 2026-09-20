@@ -66,4 +66,24 @@ describe("SLDPManager closing stop", () => {
     expect(closeMsgs).toHaveLength(1);
     expect(closeMsgs[0].data.sns).toEqual([]);
   });
+
+  it("does not send anything on a non-closing stop with no requested streams, keep-alive continues", () => {
+    // Preserve path: arm keep-alive
+    mgr.keepAliveConnection();
+    vi.advanceTimersByTime(10000);
+    expect(transport.sent.filter(isKeepAlive).length).toBeGreaterThan(0);
+
+    // Clear and stop without closing
+    transport.sent.length = 0;
+    mgr.stop({ closeConnection: false });
+
+    // Assert nothing was sent
+    const stopMsgs = transport.sent.filter((m) => m.cmd === "stop");
+    expect(stopMsgs).toHaveLength(0);
+
+    // Assert keep-alive is still running
+    vi.advanceTimersByTime(10000);
+    const keepAlives = transport.sent.filter(isKeepAlive);
+    expect(keepAlives).toHaveLength(1);
+  });
 });
