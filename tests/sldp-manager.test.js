@@ -86,4 +86,30 @@ describe("SLDPManager closing stop", () => {
     const keepAlives = transport.sent.filter(isKeepAlive);
     expect(keepAlives).toHaveLength(1);
   });
+
+  it("detach pattern keeps the connection alive and re-arm still works", () => {
+    // NimioLive.detach(): stop without closing, then re-arm keep-alive.
+    mgr._reqStreams = { 1: 0 }; // a live stream was requested
+    mgr.stop({ closeConnection: false });
+
+    const stopMsg = transport.sent.find((m) => m.cmd === "stop");
+    expect(stopMsg.data.close).toBe(false); // socket NOT closed
+
+    mgr.keepAliveConnection();
+    transport.sent.length = 0;
+    vi.advanceTimersByTime(10000);
+    expect(transport.sent.filter(isKeepAlive).length).toBe(1); // loop alive
+  });
+
+  it("closing stop with requested streams cancels those streams and closes", () => {
+    mgr._reqStreams = { 1: 0, 2: 1 };
+
+    mgr.stop({ closeConnection: true });
+
+    const stopMsg = transport.sent.find(
+      (m) => m.cmd === "stop" && m.data.close === true,
+    );
+    expect(stopMsg).toBeTruthy();
+    expect(stopMsg.data.sns.sort()).toEqual(["1", "2"]);
+  });
 });
