@@ -476,6 +476,8 @@ export class NimioLive {
     decoderFlow.onInputCancel = () => {
       this._sldpManager.cancelStream(decoderFlow.trackId);
     };
+    decoderFlow.onDecodedBufferFull = () => this._onDecodedBufferFull(type);
+
     decoderFlow.setConfig(data.config);
     this._eventBus.emit("transp:track-action", {
       op: "main",
@@ -494,6 +496,8 @@ export class NimioLive {
     this._nextRenditionData.decoderFlow.onInputCancel = () => {
       this._sldpManager.cancelStream(data.trackId);
     };
+    this._nextRenditionData.decoderFlow.onDecodedBufferFull = () =>
+      this._onDecodedBufferFull(type);
     this._nextRenditionData.decoderFlow.setConfig(data.config);
   }
 
@@ -893,6 +897,15 @@ export class NimioLive {
     this._grabber.onScreenshotReady((img, ts) => {
       this._eventBus.emit("nimio:screenshot", img, ts);
     });
+  }
+
+  _onDecodedBufferFull(type) {
+    if (!this._state.isPaused()) {
+      return;
+    }
+    this._logger.warn(`Auto stop on ${type} buffer fill`);
+    this._cancelPauseTimeout();
+    this.stop();
   }
 }
 
