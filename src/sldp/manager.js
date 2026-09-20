@@ -51,9 +51,9 @@ export class SLDPManager {
 
   stop(opts = {}) {
     const sns = this.resetRequestedStreams();
-    if (sns.length === 0) return;
-
-    this._sendRequest("stop", { sns, close: !!opts.closeConnection });
+    const close = !!opts.closeConnection;
+    if (sns.length === 0 && !close) return;
+    this._sendRequest("stop", { sns, close });
   }
 
   resetRequestedStreams() {
@@ -128,6 +128,13 @@ export class SLDPManager {
     }, 10000);
   }
 
+  cancelKeepAlive() {
+    if (this._keepAliveTimer) {
+      clearTimeout(this._keepAliveTimer);
+      this._keepAliveTimer = undefined;
+    }
+  }
+
   requestCurrentStreams() {
     this._processCurrentStreams();
     this._sendRequest("play", { streams: this._curStreams });
@@ -135,7 +142,7 @@ export class SLDPManager {
   }
 
   _sendRequest(command, data) {
-    this._keepAliveTimer = undefined;
+    this.cancelKeepAlive();
     this._transport.send(command, data);
   }
 
