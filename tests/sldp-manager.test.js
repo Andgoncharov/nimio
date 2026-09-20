@@ -42,8 +42,12 @@ describe("SLDPManager closing stop", () => {
     mgr.keepAliveConnection();
     vi.advanceTimersByTime(10000);
     expect(transport.sent.filter(isKeepAlive).length).toBeGreaterThan(0);
+    expect(vi.getTimerCount()).toBeGreaterThan(0); // keep-alive timer pending
 
     mgr.stop({ closeConnection: true });
+    // Hard cancellation: the pending timer is cleared, not just neutralized.
+    // A soft `_keepAliveTimer = undefined` would leave the timer queued (count 1).
+    expect(vi.getTimerCount()).toBe(0);
     const countAtStop = transport.sent.length;
 
     vi.advanceTimersByTime(60000);
@@ -117,10 +121,13 @@ describe("SLDPManager closing stop", () => {
     mgr.keepAliveConnection();
     vi.advanceTimersByTime(10000);
     expect(transport.sent.filter(isKeepAlive).length).toBeGreaterThan(0);
+    expect(vi.getTimerCount()).toBeGreaterThan(0); // keep-alive timer pending
 
-    transport.connected = false;   // socket already dropped
+    transport.connected = false; // socket already dropped
     transport.sent.length = 0;
     mgr.cancelKeepAlive();
+    // Hard cancellation clears the queued timer immediately.
+    expect(vi.getTimerCount()).toBe(0);
 
     vi.advanceTimersByTime(60000);
     expect(transport.sent).toHaveLength(0);

@@ -149,7 +149,7 @@ callback key stays `"error"`, only the JS method name changes.
   - Add `cancelKeepAlive()` (public) — `clearTimeout` + forget the timer.
   - `_sendRequest()` — call `cancelKeepAlive()` instead of the bare
     `this._keepAliveTimer = undefined`.
-  - `stop()` — only early-return when there is nothing to cancel *and* no close
+  - `stop()` — only early-return when there is nothing to cancel _and_ no close
     requested; otherwise send `{ sns, close }` (so a closing stop with no
     streams still cancels keep-alive and closes the socket).
 - **Modify:** `src/nimio-live.js`
@@ -165,10 +165,12 @@ callback key stays `"error"`, only the JS method name changes.
 ### Task 1: A closing stop cancels keep-alive and closes, even with no streams
 
 **Files:**
+
 - Create: `tests/sldp-manager.test.js`
 - Modify: `src/sldp/manager.js`
 
 **Interfaces:**
+
 - Consumes: `SLDPManager` constructor `new SLDPManager(instName)` and `init(transport, config)`; a mock transport exposing `connected`, `send(cmd, data)`, `setCallback(type, cb)`, `runCallback(type, data)`.
 - Produces: `SLDPManager.prototype.cancelKeepAlive()` (public); `stop({ closeConnection })` that always routes a closing stop through `_sendRequest`.
 
@@ -305,9 +307,11 @@ Locks in the behavior the statistics constraint depends on: preserve-style stops
 must leave keep-alive alone, and stops with streams must still cancel + close.
 
 **Files:**
+
 - Modify: `tests/sldp-manager.test.js`
 
 **Interfaces:**
+
 - Consumes: mock transport and `isKeepAlive` helper from Task 1.
 - Produces: no production changes.
 
@@ -386,10 +390,12 @@ is always a full teardown, so cancelling keep-alive there is safe and never
 touches the failover path.
 
 **Files:**
+
 - Modify: `src/nimio-live.js` (`destroy()`)
 - Modify: `tests/sldp-manager.test.js` (a manager-level test for the contract)
 
 **Interfaces:**
+
 - Consumes: `SLDPManager.prototype.cancelKeepAlive()` from Task 1.
 - Produces: `NimioLive.destroy()` calls `this._sldpManager.cancelKeepAlive()`.
 
@@ -405,7 +411,7 @@ it("cancelKeepAlive() stops the loop even when the transport is disconnected", (
   vi.advanceTimersByTime(10000);
   expect(transport.sent.filter(isKeepAlive).length).toBeGreaterThan(0);
 
-  transport.connected = false;   // socket already dropped
+  transport.connected = false; // socket already dropped
   transport.sent.length = 0;
   mgr.cancelKeepAlive();
 
@@ -452,9 +458,11 @@ Pure rename to fix a misnomer: the callback fires on an invalid/empty SLDP
 status (no playable source), not a transport failure. No behavior change.
 
 **Files:**
+
 - Modify: `src/nimio-transport.js`
 
 **Interfaces:**
+
 - Consumes: nothing new.
 - Produces: `NimioTransport._onInvalidStatus()` (replaces `_onTransportError()`).
 
@@ -467,6 +475,7 @@ definition and the `error:` binding in `_initTransport()`.
 - [ ] **Step 2: Rename**
 
 In `src/nimio-transport.js`:
+
 - Rename the method `_onTransportError()` → `_onInvalidStatus()` (body unchanged).
 - Update the binding: `error: this._onInvalidStatus.bind(this),`
 

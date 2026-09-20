@@ -38,7 +38,7 @@ stop(opts = {}) {
 Two coupled defects:
 
 1. **Early return skips the close (A).** In VOD mode there are no requested
-   streams, so `sns.length === 0` and `stop()` returns *before* sending the
+   streams, so `sns.length === 0` and `stop()` returns _before_ sending the
    `stop` command — even when `closeConnection` was requested. The socket is
    never told to close.
 
@@ -98,7 +98,7 @@ The keep-alive loop is armed **only** in `NimioLive.detach()`, immediately after
 `this.stop({ keepConnection: true })` sets the state to `STOPPED`. So for the
 entire window in which keep-alive is on (the live player is detached during VOD),
 `isStopped` is `true`. The manager is therefore called **only** when the caller
-passes a closing stop (`opts.keepConnection` falsy) *and* the socket is still
+passes a closing stop (`opts.keepConnection` falsy) _and_ the socket is still
 connected.
 
 1. **`stop({ keepConnection: true })` during VOD — CORRECT to skip the manager.**
@@ -150,7 +150,7 @@ the session and its keep-alive loop alive (see Domain constraint above):
 2. On a closing stop, `stop()` **sends the `stop` command with `close: true`**
    even if there are no requested streams, so the WebSocket is closed.
 3. **Preserve paths keep keep-alive running.** `NimioLive.stop({ keepConnection:
-   true })` — the VOD detach and the `_onInvalidStatus()` failover — must leave
+true })` — the VOD detach and the `_onInvalidStatus()` failover — must leave
    the session and the keep-alive loop intact so a later return to live reuses
    the same server session. The fix must **not** add an unconditional keep-alive
    cancel to `NimioLive.stop()`.
@@ -176,7 +176,7 @@ the session and its keep-alive loop alive (see Domain constraint above):
   - `src/nimio-transport.js` — rename the misnamed callback (currently
     `_onTransportError()`) to `_onInvalidStatus()` (see below).
 - **Out of scope:** `NimioVod`/`Nimio` orchestration; the `_onInvalidStatus`
-  keep-alive *preservation* behavior (intended — only the name changes); the
+  keep-alive _preservation_ behavior (intended — only the name changes); the
   keep-alive interval; the SLDP wire protocol.
 
 ### Naming fix: `_onTransportError()` is a misnomer
