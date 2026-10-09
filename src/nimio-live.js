@@ -271,7 +271,6 @@ export class NimioLive {
 
   destroy() {
     this.stop();
-    this._sldpManager.cancelKeepAlive();
     this._removeUIEventHandlers();
   }
 
