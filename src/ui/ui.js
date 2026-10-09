@@ -18,6 +18,8 @@ import { UiPip } from "./ui-pip";
 import { MODE } from "@/shared/values";
 import OffscreenRendererWorker from "./offscreen-renderer-worker.js?worker";
 
+const CONTROLS_STYLE_ATTR = "data-nimio-controls";
+
 export class UI {
   constructor(instName, parent, opts, eventBus) {
     this._state = "pause";
@@ -32,6 +34,16 @@ export class UI {
       throw new Error("UI container element is not valid");
     }
 
+    try {
+      this._construct(opts);
+    } catch (err) {
+      // never leave DOM, observers or document listeners behind
+      this._rollbackConstruction();
+      throw err;
+    }
+  }
+
+  _construct(opts) {
     this._container = document.createElement("div");
     this._parent.appendChild(this._container);
     this._container.classList.add("nimio-container");
@@ -89,7 +101,8 @@ export class UI {
 
       this._captionList = new UICaptionList(this._controlsBar, this._eventBus);
       this._captionCtrl.list = this._captionList;
-      this._eventBus.on("aux:caption-list-open", () => this._closeAbrMenu());
+      this._onCaptionListOpen = () => this._closeAbrMenu();
+      this._eventBus.on("aux:caption-list-open", this._onCaptionListOpen);
     }
 
     if (this._opts.fullscreen) {
@@ -126,6 +139,29 @@ export class UI {
     }
   }
 
+  _rollbackConstruction() {
+    try {
+      this._offscreenRenderer?.terminate();
+    } catch (err) {
+      this._logger.warn("Offscreen renderer cleanup failed", err);
+    }
+    this._offscreenRenderer = undefined;
+    try {
+      this._removeCaptions();
+    } catch (err) {
+      this._logger.warn("Caption cleanup failed", err);
+    }
+    this._resizeObserver?.disconnect();
+    if (this._onViewportUpd) this._removeDisplayEventHandlers();
+    // handlers are bound as own properties by _addPlaybackEventHandlers
+    if (Object.hasOwn(this, "_onPlaybackEnded")) {
+      this._removePlaybackEventHandlers();
+    }
+    if (this._container?.parentNode) {
+      this._container.parentNode.removeChild(this._container);
+    }
+  }
+
   destroy() {
     if (this._offscreenRenderer) {
       this._offscreenRenderer.postMessage({ type: "release" });
@@ -142,11 +178,18 @@ export class UI {
     this._container.removeEventListener("mousemove", this._onMouseMove);
     this._container.removeEventListener("mouseout", this._onMouseOut);
     this._container.removeEventListener("click", this._onClick);
-    this._resizeObserver.unobserve(this._container);
+    this._resizeObserver.disconnect();
+    if (this._onCaptionListOpen) {
+      this._eventBus.off("aux:caption-list-open", this._onCaptionListOpen);
+      this._onCaptionListOpen = undefined;
+    }
     while (this._container.firstChild) {
       this._container.removeChild(this._container.firstChild);
     }
-    this._parent.removeChild(this._container);
+    // the host may already have removed the container from the DOM
+    if (this._container.parentNode) {
+      this._container.parentNode.removeChild(this._container);
+    }
   }
 
   drawPlay() {
@@ -348,9 +391,12 @@ export class UI {
     this._buttonFullscreen.addEventListener("click", this._onFullscreenClick);
     this._canvas.addEventListener("dblclick", this._onFullscreenClick);
 
-    const style = document.createElement("style");
-    style.textContent = controlsCss;
-    document.head.appendChild(style);
+    if (!document.head.querySelector(`style[${CONTROLS_STYLE_ATTR}]`)) {
+      const style = document.createElement("style");
+      style.setAttribute(CONTROLS_STYLE_ATTR, "");
+      style.textContent = controlsCss;
+      document.head.appendChild(style);
+    }
   }
 
   _addControlsEventHandlers() {

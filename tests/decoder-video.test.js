@@ -475,4 +475,18 @@ describe("decoder-video", () => {
       });
     },
   );
+
+  it("replies shutdownComplete and closes even before codec data arrived", async () => {
+    globalThis.close = vi.fn();
+    await import("@/media/decoders/decoder-video.js");
+    sendWorkerMessage({
+      type: "config",
+      config: { codec: "avc1.42e01e", width: 640, height: 480 },
+    });
+
+    sendWorkerMessage({ type: "shutdown" });
+
+    expect(postMessageMock).toHaveBeenCalledWith({ type: "shutdownComplete" });
+    expect(globalThis.close).toHaveBeenCalledTimes(1);
+  });
 });

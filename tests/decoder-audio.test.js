@@ -461,4 +461,16 @@ describe("decoder-audio", () => {
     vi.runAllTimers();
     expect(decodeMock).toHaveBeenCalledTimes(2);
   });
+
+  it("replies shutdownComplete and closes even before codec data arrived", async () => {
+    globalThis.close = vi.fn();
+    await import("@/media/decoders/decoder-audio.js");
+
+    globalThis.dispatchEvent(
+      new MessageEvent("message", { data: { type: "shutdown" } }),
+    );
+
+    expect(postMessageMock).toHaveBeenCalledWith({ type: "shutdownComplete" });
+    expect(globalThis.close).toHaveBeenCalledTimes(1);
+  });
 });

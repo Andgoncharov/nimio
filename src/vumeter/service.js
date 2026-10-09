@@ -42,7 +42,10 @@ class VUMeterService {
   }
 
   clear() {
-    this.stop(true);
+    if (this._inst) {
+      this._audGraphCtrl.removeNode(this._inst.node);
+      this._inst.dispose();
+    }
 
     this._settings = undefined;
     this._inst = undefined;
@@ -73,6 +76,7 @@ class VUMeterService {
   }
 
   _onMeterLoaded(meter) {
+    if (!this._settings) return;
     if (this._settings.type === "input") {
       this._audGraphCtrl.prependNode(meter, {
         connectSource: true,
@@ -89,6 +93,7 @@ class VUMeterService {
   }
 
   _onFatalError() {
+    if (!this._settings) return;
     if ("AudioWorklet" === this._settings.api) {
       this._settings.api = "ScriptProcessor";
       this.init(this._settings);

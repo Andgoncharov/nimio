@@ -13,7 +13,8 @@ class AudioContextProvider {
       navigator.audioSession.type = "playback";
     }
 
-    if (this._audioCtx?.sampleRate !== sampleRate) {
+    if (this._audioCtx && this._audioCtx.sampleRate !== sampleRate) {
+      this._closeContext(this._audioCtx);
       this._audioCtx = undefined;
     }
 
@@ -70,6 +71,33 @@ class AudioContextProvider {
   reset() {
     this._callbacks = undefined;
     this._suspended = false;
+  }
+
+  destroy() {
+    this._callbacks = undefined;
+    this._suspended = false;
+
+    const ctx = this._audioCtx;
+    this._audioCtx = undefined;
+    if (!ctx) return;
+
+    this._closeContext(ctx);
+  }
+
+  _closeContext(ctx) {
+    ctx.onstatechange = undefined;
+    if (ctx.state === "closed") return;
+
+    try {
+      const res = ctx.close();
+      if (res && typeof res.catch === "function") {
+        res.catch((err) =>
+          this._logger.debug("AudioContext close failed", err),
+        );
+      }
+    } catch (err) {
+      this._logger.debug("AudioContext close failed", err);
+    }
   }
 
   onContextRunning(cb) {

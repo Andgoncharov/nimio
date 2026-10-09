@@ -4,6 +4,9 @@ import { LoggersFactory } from "@/shared/logger";
 import { EventBus } from "@/event-bus";
 
 const SWITCH_THRESHOLD_US = 8_000_000;
+// Time given to the decoder worker to acknowledge "shutdown" before the
+// thread is killed from the main side (worker crashed or never replied).
+const SHUTDOWN_FALLBACK_MS = 1000;
 
 export class DecoderFlow {
   constructor(instanceName, trackId, timescale, type, url) {
@@ -109,16 +112,37 @@ export class DecoderFlow {
   }
 
   destroy() {
-    if (this._isShuttingDown || !this._decoder) return;
+    // messages still in flight from the worker must not reach the buffer
+    // or the engine once the flow is destroyed
+    this._destroyed = true;
+    const decoder = this._decoder;
+    if (!decoder) return;
 
     this._switchPeerFlow = null;
-    this._cancelInput();
-    this._shutdown();
-    this._trackId = null;
-    if (this._buffer) {
-      this._buffer.reset();
-      this._buffer = null;
+    try {
+      this._cancelInput();
+      this._shutdown(); // no-op when a switch already posted the shutdown
+    } catch (err) {
+      this._logger.error("Decoder flow shutdown failed", err);
+    } finally {
+      // whatever happened above, an owned worker is always terminated and
+      // the buffer released
+      this._scheduleForcedTermination(decoder);
+      this._trackId = null;
+      if (this._buffer) {
+        this._buffer.reset();
+        this._buffer = null;
+      }
     }
+  }
+
+  _scheduleForcedTermination(decoder) {
+    setTimeout(() => {
+      if (this._decoder !== decoder) return; // shutdownComplete handled it
+      this._removeDecoderListener();
+      decoder.terminate();
+      this._decoder = null;
+    }, SHUTDOWN_FALLBACK_MS);
   }
 
   finalizeSwitch() {
@@ -169,6 +193,10 @@ export class DecoderFlow {
     switch (e.data.type) {
       case "decodedFrame":
         let frame = this._prepareFrame(e.data);
+        if (this._destroyed) {
+          frame.close();
+          break;
+        }
         if (this._switchContext) {
           this._updateSwitchTimestamps(frame.timestamp);
           this._switchContext.handleFrame(frame);
@@ -177,6 +205,7 @@ export class DecoderFlow {
         await this._handleDecoderOutput(frame, e.data);
         break;
       case "decoderError":
+        if (this._destroyed) break;
         if (this._switchContext?.src) {
           this._onSwitchResult(false);
           this.destroy();
@@ -191,6 +220,12 @@ export class DecoderFlow {
           this._removeDecoderListener();
           this._decoder.terminate();
           this._decoder = null;
+        }
+        if (this._destroyed) {
+          // destroyed while a switch was finalizing: adopt nothing
+          this._switchPeerFlow = null;
+          this._switchContext = null;
+          break;
         }
         if (this._switchPeerFlow) {
           this._decoder = this._switchPeerFlow.exportDecoder();
@@ -283,6 +318,10 @@ export class DecoderFlow {
   }
 
   async _handleDecodedFrame(frame) {
+    if (this._destroyed || !this._buffer) {
+      frame.close();
+      return false;
+    }
     if (this._state.isStopped()) {
       frame.close();
       return true;
@@ -290,10 +329,17 @@ export class DecoderFlow {
 
     if (this._startTsUs === 0) {
       if (this._onStartTsNotSet) {
-        let res = await this._onStartTsNotSet(frame);
-        if (!res) {
+        let res;
+        try {
+          res = await this._onStartTsNotSet(frame);
+        } catch (err) {
+          this._logger.error("Flow output initialization failed", err);
+          res = false;
+        }
+        if (!res || !this._buffer) {
+          // output failed, or the flow was destroyed while waiting
           frame.close();
-          return false; // flow output failed
+          return false;
         }
       }
 

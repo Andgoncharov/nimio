@@ -85,6 +85,16 @@ self.onmessage = (e) => {
     return;
   }
 
+  if (type === "terminate") {
+    if (socket) {
+      socket.onclose = undefined;
+      socket.close();
+      socket = undefined;
+    }
+    self.close();
+    return;
+  }
+
   if (!socket && ["play", "stop"].includes(type)) {
     console.warn(`Attempt to send ${type} command via closed socket`);
     return;

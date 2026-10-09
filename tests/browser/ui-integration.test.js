@@ -1,5 +1,6 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { UI } from "@/ui/ui";
+import { UICaptionController } from "@/ui/caption-controller";
 import { MODE } from "@/shared/values";
 
 // Integration tests for the production probe wiring in
@@ -199,5 +200,117 @@ describe("UI probe integration", () => {
       FADE_MS + 2500,
     );
     expect(recovered).toBe(true);
+  });
+});
+
+describe("UI stylesheet", () => {
+  const parents = [];
+  const uis = [];
+
+  afterEach(() => {
+    for (const ui of uis) {
+      try {
+        ui.destroy();
+      } catch {
+        // already destroyed
+      }
+    }
+    uis.length = 0;
+    for (const p of parents) p.remove();
+    parents.length = 0;
+  });
+
+  function build(name) {
+    const parent = document.createElement("div");
+    parent.style.cssText = "display:block;width:400px";
+    document.body.appendChild(parent);
+    parents.push(parent);
+    const ui = new UI(
+      name,
+      parent,
+      { width: "100%", height: "100%", ar: "16:9" },
+      stubBus,
+    );
+    uis.push(ui);
+    return ui;
+  }
+
+  it("injects the controls stylesheet once per document", () => {
+    build("style-a");
+    build("style-b");
+
+    expect(
+      document.head.querySelectorAll("style[data-nimio-controls]").length,
+    ).toBe(1);
+  });
+
+  it("destroy tolerates a container already removed from the DOM", () => {
+    const ui = build("style-removed");
+    parents[parents.length - 1].innerHTML = "";
+
+    expect(() => ui.destroy()).not.toThrow();
+  });
+
+  it("a constructor failure leaves no DOM behind", () => {
+    const parent = document.createElement("div");
+    parent.style.cssText = "display:block;width:400px";
+    document.body.appendChild(parent);
+    parents.push(parent);
+    const spy = vi.spyOn(UI.prototype, "_setupPip").mockImplementation(() => {
+      throw new Error("blocked by CSP");
+    });
+    try {
+      expect(
+        () =>
+          new UI(
+            "style-ctor-fail",
+            parent,
+            { width: "100%", height: "100%", ar: "16:9" },
+            stubBus,
+          ),
+      ).toThrow("blocked by CSP");
+
+      expect(parent.childElementCount).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a constructor failure after captions were set up deinitializes them", () => {
+    const parent = document.createElement("div");
+    parent.style.cssText = "display:block;width:400px";
+    document.body.appendChild(parent);
+    parents.push(parent);
+    const proto = Object.getPrototypeOf(
+      UICaptionController.getInstance("caption-probe"),
+    );
+    const deinit = vi.spyOn(proto, "deinit");
+    const fail = vi
+      .spyOn(UI.prototype, "_setBackground")
+      .mockImplementation(() => {
+        throw new Error("blocked by CSP");
+      });
+    try {
+      expect(
+        () =>
+          new UI(
+            "style-ctor-captions",
+            parent,
+            {
+              width: "100%",
+              height: "100%",
+              ar: "16:9",
+              captions: { CC1: { default: true } },
+            },
+            stubBus,
+          ),
+      ).toThrow("blocked by CSP");
+
+      expect(deinit).toHaveBeenCalledTimes(1);
+      expect(parent.childElementCount).toBe(0);
+    } finally {
+      fail.mockRestore();
+      deinit.mockRestore();
+    }
   });
 });

@@ -35,15 +35,20 @@ class PlaybackContext {
     this._curConf = [];
   }
 
+  // Resolves to true when the streams were committed, false when a newer
+  // setStreams() call superseded this one while codec support was checked.
+  // Shared state is only touched after the await, in one synchronous step.
   async setStreams(streams) {
+    const seq = (this._streamsSeq = (this._streamsSeq || 0) + 1);
+    const cSupport = await this._checkSupportedCodecs(streams);
+    if (seq !== this._streamsSeq) return false;
+
     this._streams = streams;
     this._streamsMap = {};
-
     this._ordRenditions = [];
     this._ordVideoRenditions = [];
     this._ordAudioRenditions = [];
-
-    this._cSupport = await this._checkSupportedCodecs(streams);
+    this._cSupport = cSupport;
 
     let noVideoStreams = [];
     for (let i = 0; i < streams.length; i++) {
@@ -119,6 +124,7 @@ class PlaybackContext {
     this._cpAudioRenditions(this._ordAudioRenditions, this._ordVideoRenditions);
     this._cpAudioRenditions(this._ordAudioRenditions, noVideoStreams);
     this._cpAudioRenditions(this._ordRenditions, noVideoStreams);
+    return true;
   }
 
   getCurrentIdx(type) {

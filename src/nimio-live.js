@@ -1,6 +1,7 @@
 import audioProcUrl from "./audio/nimio-processor?worker&url"; // ?worker&url - Vite initiate new Rollup build
 import wsTransportUrl from "./transport/web-socket?worker&url";
 import { IDX, MODE, STATE } from "./shared/values";
+import { runCleanupSteps } from "./shared/helpers";
 import { StateManager } from "./state-manager";
 import { SLDPManager } from "./sldp/manager";
 import { PlaybackContext } from "./playback/context";
@@ -86,6 +87,7 @@ export class NimioLive {
     this._reconnect = new Reconnector(this._instName, this._config.reconnects);
 
     this._audioWorkletReady = null;
+    this._audioInitGen = 0; // bumped by _stopAudio() to cancel a pending init
     this._audioConfig = new AudioConfig(48000, 1, 1024); // default values
     this._audioCtxProvider = AudioContextProvider.getInstance(this._instName);
     this._audioCtrl = AudioController.getInstance(this._instName);
@@ -102,11 +104,9 @@ export class NimioLive {
     }
 
     this._playCb = this.play.bind(this);
+    this._autoplayTimers = [];
     if (this._config.autoplay) {
-      setTimeout(this._playCb, 0);
-      setTimeout(() => {
-        if (this._ui) this._ui.hideControls(true);
-      }, 1000);
+      this._scheduleAutoplay();
     }
 
     if (this._config.screenshots) {
@@ -116,7 +116,7 @@ export class NimioLive {
   }
 
   play() {
-    if (this._state.isPlaying()) return;
+    if (this._destroyed || this._state.isPlaying()) return;
 
     const initialPlay = !this._state.isPaused();
     this._cancelPauseTimeout();
@@ -127,12 +127,16 @@ export class NimioLive {
       this._startAbrController();
     }
     this._eventBus.emit("nimio:play", { mode: MODE.LIVE });
+    // a listener may have destroyed or stopped the player
+    if (this._destroyed || this._state.isStopped()) return;
 
     this._playbackStarted = false;
     requestAnimationFrame(this._renderVideoFrame);
 
     if (initialPlay) {
       this._sldpManager.start(this._config.streamUrl, this._config.startOffset);
+      // start() emits nimio:connection-started; a listener may destroy/stop us
+      if (this._destroyed || this._state.isStopped()) return;
       if (this._debugView) {
         this._debugView.start();
       }
@@ -142,7 +146,7 @@ export class NimioLive {
   }
 
   pause() {
-    if (this._state.isPaused()) return;
+    if (this._destroyed || this._state.isPaused()) return;
 
     this._state.pause();
     this._latencyCtrl.pause();
@@ -180,7 +184,7 @@ export class NimioLive {
   }
 
   attach(ui, params) {
-    if (this._ui) return false;
+    if (this._ui || this._destroyed) return false;
 
     if (!params) params = { latency: 0 };
     let latencyMs = params.latency * 1000;
@@ -226,6 +230,8 @@ export class NimioLive {
           this._config.streamUrl,
           this._config.startOffset,
         );
+    // start() emits nimio:connection-started; a listener may destroy/stop us
+    if (this._destroyed || this._state.isStopped()) return false;
     if (this._debugView) this._debugView.start();
     return true;
   }
@@ -270,8 +276,42 @@ export class NimioLive {
   }
 
   destroy() {
-    this.stop();
-    this._removeUIEventHandlers();
+    this._destroyed = true; // a playback-end listener must not restart us
+    // every stage runs even if an earlier one (e.g. an application listener
+    // invoked from stop()) throws; the first error is rethrown at the end
+    const errors = runCleanupSteps(this._logger, "destroy", [
+      [
+        "timers",
+        () => {
+          this._cancelAutoplay();
+          this._cancelPauseTimeout();
+        },
+      ],
+      ["stop", () => this.stop()],
+      // the playback state must end even if stop() threw before reaching it
+      ["state", () => this._state.stop()],
+      // stop() returns early on a stopped engine, so release whatever may
+      // still exist (flows, ABR timers, audio graph, grabber, overlay)
+      ["media resources", () => this._releaseMediaResources()],
+      ["SLDP manager", () => this._sldpManager.destroy()],
+      ["reconnector", () => this._reconnect.destroy()],
+      [
+        "listeners",
+        () => {
+          this._eventBus.off("transp:track-action", this._onTrackAction);
+          if (this._onSyncModeParams) {
+            this._eventBus.off(
+              "nimio:sync-mode-params",
+              this._onSyncModeParams,
+            );
+          }
+          this._removeUIEventHandlers();
+        },
+      ],
+      ["transport", () => this._transport.destroy()],
+    ]);
+
+    if (errors.length) throw errors[0];
   }
 
   setParameters(params) {
@@ -405,7 +445,9 @@ export class NimioLive {
   }
 
   _renderVideoFrame() {
-    if (this._noVideo || !this._state.isPlaying()) return true;
+    if (this._destroyed || this._noVideo || !this._state.isPlaying()) {
+      return true;
+    }
 
     requestAnimationFrame(this._renderVideoFrame);
     if (null === this._audioWorkletReady || 0 === this._playbackStartTsUs) {
@@ -428,10 +470,8 @@ export class NimioLive {
       return true;
     }
 
-    if (!this._playbackStarted) {
-      this._eventBus.emit("nimio:playback-start", { mode: MODE.LIVE });
-      this._playbackStarted = true;
-      this._grabber?.start(MODE.LIVE);
+    if (!this._playbackStarted && !this._startPlaybackOutput(frame)) {
+      return false;
     }
     let isNeedScreenshot = false;
     if (this._grabber && this._offscreenCanvas) {
@@ -559,10 +599,20 @@ export class NimioLive {
     // }
 
     // create AudioContext with correct sampleRate on first frame
+    const gen = this._audioInitGen;
     await this._initAudioProcessor(frame.sampleRate, frame.numberOfChannels);
+    if (gen !== this._audioInitGen) {
+      // playback was stopped (and maybe restarted) meanwhile: this frame
+      // belongs to the old run and must not touch the new one's state
+      return false;
+    }
 
     if (!this._audioContext || !this._audioNode) {
-      this._logger.error("Audio context is not initialized. Can't play audio.");
+      if (!this._state.isStopped()) {
+        this._logger.error(
+          "Audio context is not initialized. Can't play audio.",
+        );
+      }
       this._audioContext = this._audioNode = null;
       return false;
     }
@@ -707,6 +757,10 @@ export class NimioLive {
   }
 
   async _initAudioProcessor(sampleRate, channels, idle) {
+    // No-audio mode on top of an existing node: that node already drives the
+    // playback clock and _setNoAudio() silenced it. Re-initialising would
+    // close its context and freeze video.
+    if (idle && this._audioNode) return;
     this._logger.debug(
       `Initialize audio processor, sampleRate=${sampleRate}, channels=${channels}, idle=${idle}, audio context exists=${!!this._audioContext}`,
     );
@@ -728,17 +782,26 @@ export class NimioLive {
       }
 
       // load processor
+      const loadGen = this._audioInitGen;
       this._audioWorkletReady = this._audioContext.audioWorklet
         .addModule(audioProcUrl)
         .catch((err) => {
-          this._logger.error("Audio worklet error", err);
+          if (loadGen === this._audioInitGen) {
+            this._logger.error("Audio worklet error", err);
+          }
         });
 
       this._audioCtrl.initVolume(this._config.volumeId, this._config.muted);
       this._vuMeterSvc.setAudioInfo({ sampleRate, channels });
     }
 
+    const gen = this._audioInitGen;
     await this._audioWorkletReady;
+    if (gen !== this._audioInitGen) {
+      // audio was stopped (or the engine destroyed) while the module loaded
+      this._logger.debug("Audio processor initialization cancelled");
+      return;
+    }
     if (this._audioNode) return;
 
     let procOptions = {
@@ -792,6 +855,7 @@ export class NimioLive {
     if (this._config.syncBuffer > 0) {
       let smc = new SyncModeClock(this._audioNode.port);
       await smc.sync();
+      if (gen !== this._audioInitGen) return; // stopped during the handshake
       this._applySyncModeParams();
     }
     this._sendPendingAdvertizerActions();
@@ -832,6 +896,7 @@ export class NimioLive {
 
   _stopAudio() {
     this._logger.debug("stopAudio");
+    this._audioInitGen++;
     if (this._audioContext) {
       this._audioCtrl.reset();
       this._audioContext = this._audioNode = this._audioWorkletReady = null;
@@ -858,6 +923,56 @@ export class NimioLive {
     if (ms < this._lowBufferMs) {
       this._metricsManager.reportLowBuffer(trackId);
     }
+  }
+
+  // First rendered frame: notify the application, then start the grabber.
+  // Returns false (and closes the frame) when a listener destroyed us.
+  _startPlaybackOutput(frame) {
+    this._playbackStarted = true;
+    try {
+      this._eventBus.emit("nimio:playback-start", { mode: MODE.LIVE });
+    } catch (err) {
+      // an application listener failed (possibly while destroying us);
+      // the popped frame must still be handled below
+      this._logger.error("nimio:playback-start listener failed", err);
+    }
+    if (this._destroyed || this._state.isStopped()) {
+      frame.close(); // the buffer it came from was cleared by the stop
+      return false;
+    }
+    this._grabber?.start(MODE.LIVE);
+    return true;
+  }
+
+  _releaseMediaResources() {
+    if (this._debugView) this._debugView.stop();
+    if (this._abrController) this._abrController.stop({ hard: true });
+    if (this._nextRenditionData?.decoderFlow) {
+      this._nextRenditionData.decoderFlow.destroy();
+    }
+    this._nextRenditionData = null;
+    for (const type of ["video", "audio"]) {
+      if (this._decoderFlows?.[type]) {
+        this._decoderFlows[type].destroy();
+        this._decoderFlows[type] = null;
+      }
+    }
+    this._stopAudio();
+    this._grabber?.stop();
+  }
+
+  _scheduleAutoplay() {
+    this._autoplayTimers = [
+      setTimeout(this._playCb, 0),
+      setTimeout(() => {
+        if (this._ui) this._ui.hideControls(true);
+      }, 1000),
+    ];
+  }
+
+  _cancelAutoplay() {
+    for (const id of this._autoplayTimers || []) clearTimeout(id);
+    this._autoplayTimers = [];
   }
 
   _createLatencyController() {

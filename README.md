@@ -117,6 +117,7 @@ nimio = new Nimio({
   streamUrl: "wss://example.com/stream", //SLDP stream URL
   container: "#player", // CSS selector or HTMLElement
   //optional parameters:
+  instanceName: "player1", // unique name of the player instance; generated when omitted. If an existing (not yet destroyed) player already uses the name, a suffixed name is used and a warning is logged. The effective name is written back to this options object
   width: 476, // player width in pixels or CSS string, e.g. "100%"
   height: 268, // player height in pixels or CSS string, e.g. "auto"
   latency: 600, // Target latency in ms
@@ -229,7 +230,7 @@ These methods are available on every `Nimio` player instance.
 - `stop()`  
   Stop and reset the player.
 - `destroy()`  
-  Destroy the player instance and release all memory.
+  Destroy the player instance: stops playback, terminates the transport and decoder workers, closes the audio context, removes every event listener (including those added with `on()`) and releases all services registered under the instance name. Cleanup always completes; if a component or an application listener throws during it, the first error is rethrown afterwards. Calling `destroy()` again, or any other public method, on a destroyed player is a safe no-op (queries return neutral values). The instance name can be reused by a new player afterwards.
 - `version()`  
   Return the current version string of the player instance.
 

@@ -17,6 +17,8 @@ import { LoggersFactory } from "./shared/logger";
 import { AudioVolumeController } from "./audio/volume-controller";
 import { PlaybackThumbnailService } from "./playback/thumbnail-service";
 import { SPSHolder } from "./sps/holder";
+import { releaseInstances, hasInstances } from "./shared/service";
+import { runCleanupSteps } from "./shared/helpers";
 
 let scriptPath;
 if (document.currentScript === null) {
@@ -30,18 +32,67 @@ if (scriptPath) {
   scriptPath = scriptPath.substr(0, scriptPath.lastIndexOf("/") + 1);
 }
 
+let instanceCounter = 0;
+
+// Returns a name no live player uses. Unnamed players get "nimio_<n>";
+// a name that is still registered (previous player not destroyed) gets
+// the first free "_<k>" suffix so the new player never shares services.
+function resolveInstanceName(requested) {
+  if (!requested) {
+    let name;
+    do {
+      name = "nimio_" + ++instanceCounter;
+    } while (hasInstances(name));
+    return { name, requested: name };
+  }
+
+  const base = requested;
+  if (!hasInstances(base)) return { name: base, requested: base };
+
+  let k = 2;
+  while (hasInstances(`${base}_${k}`)) k++;
+  return { name: `${base}_${k}`, requested: base };
+}
+
 export default class Nimio {
   constructor(options) {
-    if (options && !options.instanceName) {
-      options.instanceName = "nimio_" + (Math.floor(Math.random() * 10000) + 1);
+    const resolved = resolveInstanceName(options?.instanceName);
+    if (options) options.instanceName = resolved.name;
+    this._instName = resolved.name;
+    try {
+      this._init(options, resolved);
+    } catch (err) {
+      // a failed construction must leave neither DOM, engines nor the name
+      this._rollbackInit();
+      throw err;
     }
-    this._instName = options.instanceName;
+  }
+
+  _rollbackInit() {
+    runCleanupSteps(this._logger || console, "Nimio init rollback", [
+      ["VOD player", () => this._vodPlayer?.destroy()],
+      ["live player", () => this._livePlayer?.destroy()],
+      ["VU meter", () => this._vuMeterSvc?.clear()],
+      ["UI", () => this._ui?.destroy()],
+    ]);
+    this._vodPlayer = this._livePlayer = this._ui = undefined;
+    this._vuMeterSvc = undefined;
+    this._destroyed = true;
+    releaseInstances(this._instName);
+  }
+
+  _init(options, resolved) {
     ScriptPathProvider.getInstance(this._instName).setScriptPath(scriptPath);
     this._eventBus = EventBus.getInstance(this._instName);
 
     this._config = createConfig(options);
     this._logger = LoggersFactory.create(this._instName, "Nimio");
     this._logger.debug("Nimio " + this.version());
+    if (resolved.requested !== resolved.name) {
+      this._logger.warn(
+        `Instance name "${resolved.requested}" is already in use by a player that was not destroyed; using "${resolved.name}"`,
+      );
+    }
 
     const { element: containerElem, storageKey } = resolveContainer(
       this._config.container,
@@ -98,33 +149,47 @@ export default class Nimio {
   }
 
   destroy() {
-    if (!this._ui) return;
+    if (this._destroyed) return;
+    this._destroyed = true;
 
-    this._ui.destroy();
+    // every component is torn down independently: one failure must not
+    // leave the others running, and the name is always released
+    const errors = runCleanupSteps(this._logger, "destroy", [
+      ["UI", () => this._ui.destroy()],
+      ["volume handlers", () => this._removeVolumeEventHandlers()],
+      ["VU meter", () => this._vuMeterSvc.clear()],
+      ["VOD player", () => this._vodPlayer?.destroy()],
+      ["live player", () => this._livePlayer.destroy()],
+      ["listeners", () => this._eventBus.removeAllListeners()],
+    ]);
+    releaseInstances(this._instName);
+
     this._ui = undefined;
-    this._removeVolumeEventHandlers();
-    this._vuMeterSvc.clear();
-
-    if (this._vodPlayer) {
-      this._vodPlayer.destroy();
-      this._vodPlayer = undefined;
-    }
-
-    this._livePlayer.destroy();
+    this._vodPlayer = undefined;
     this._livePlayer = undefined;
-    this._eventBus.off("nimio:connection-established", this._onLiveConnected);
-    this._eventBus.off("aux:playback-error", this._onError);
+    this._actPlayer = undefined;
+    this._eventBus = undefined;
+    this._context = undefined;
+    this._vuMeterSvc = undefined;
+    this._playProgressSvc = undefined;
+    this._playProgressProxy = undefined;
+    this._thumbnailSvc = undefined;
+    this._audioVolumeCtrl = undefined;
+    this._spsHolder = undefined;
+
+    if (errors.length) throw errors[0];
   }
 
   setParameters(params) {
-    this._livePlayer.setParameters(params);
+    this._livePlayer?.setParameters(params);
   }
 
   play() {
-    this._actPlayer.play();
+    this._actPlayer?.play();
   }
 
   setStreamURL(url) {
+    if (this._destroyed) return;
     updateConfigStreamURL(this._config, url);
     if (this._vodPlayer && this._vodPlayer.isRunning()) {
       this._vodPlayer.stop(() => {
@@ -138,10 +203,11 @@ export default class Nimio {
   }
 
   pause() {
-    this._actPlayer.pause();
+    this._actPlayer?.pause();
   }
 
   stop() {
+    if (this._destroyed) return;
     if (this._vodPlayer && this._vodPlayer.isRunning()) {
       this._vodPlayer.stop(() => {
         this._livePlayer.attach(this._ui);
@@ -162,6 +228,7 @@ export default class Nimio {
   }
 
   seekLive(buffer) {
+    if (!this._playProgressProxy) return false;
     if (buffer === undefined || buffer === null) buffer = 0;
     return this._playProgressProxy.seekLive(buffer);
   }
@@ -188,6 +255,7 @@ export default class Nimio {
   _runVodFromStart(pos) {
     if (this._vodPlayer?.isLoaded() && !this._vodPlayer.isRunning()) {
       this._vodPlayer.initialize(this._ui.mediaElement).then(() => {
+        if (this._destroyed) return;
         let curState = this._context.state.value;
         this._switchToVod(pos);
         this._context.setState(curState, true);

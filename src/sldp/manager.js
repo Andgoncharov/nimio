@@ -14,6 +14,24 @@ export class SLDPManager {
     this._logger = LoggersFactory.create(instName, "SLDP Manager");
     this._eventBus = EventBus.getInstance(instName);
     this._useSyncMode = false;
+    this._setupTimers = new Set();
+    this._runToken = 0; // bumped on stop so pending status work is dropped
+  }
+
+  destroy() {
+    this._runToken++;
+    this._cancelSetupTimers();
+    // a keep-alive armed for a detached live session must not outlive the
+    // player, even when the transport already reported disconnected
+    if (this._keepAliveTimer) {
+      clearTimeout(this._keepAliveTimer);
+      this._keepAliveTimer = undefined;
+    }
+  }
+
+  _cancelSetupTimers() {
+    for (const id of this._setupTimers) clearTimeout(id);
+    this._setupTimers.clear();
   }
 
   init(transport, config) {
@@ -30,16 +48,23 @@ export class SLDPManager {
 
     this._transport = transport;
     this._transport.setCallback("status", async (status) => {
+      // a stop between start() and the status reply invalidates the run
+      if (this._startToken !== this._runToken) return;
       if (this._useSyncMode) {
         this._handleSyncParams(status);
       }
-      await this._processStatus(status.info);
-      this._sendRequest("play", { streams: this._curStreams });
-      this._curStreams = [];
+      const token = this._runToken;
+      // the prepared streams stay local to this status: a cancelled status
+      // settling later must not touch what a restarted one prepared
+      const streams = await this._processStatus(status.info);
+      // a connection-established listener may itself have stopped playback
+      if (!streams || token !== this._runToken) return;
+      this._sendRequest("play", { streams });
     });
   }
 
   start(url) {
+    this._startToken = this._runToken;
     this._context.setSourceUrl(url);
     this._sendRequest("start", {
       url: url,
@@ -57,6 +82,8 @@ export class SLDPManager {
   }
 
   resetRequestedStreams() {
+    this._runToken++;
+    this._cancelSetupTimers();
     const sns = Object.keys(this._reqStreams);
     this._transport.send("removeTimescale", sns);
     this._reqStreams = {};
@@ -72,9 +99,11 @@ export class SLDPManager {
     let ss = this._serializeStream(type, stream, offset);
     let setup = this._setupObject(type, ss.sn, stream.stream_info);
 
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      this._setupTimers.delete(timer);
       this._transport.runCallback(`${type}Setup`, setup);
     }, 0);
+    this._setupTimers.add(timer);
     this._transport.send("timescale", { [ss.sn]: setup.timescale });
 
     this._reqStreams[ss.sn] = idx;
@@ -139,8 +168,12 @@ export class SLDPManager {
     this._transport.send(command, data);
   }
 
+  // Resolves to the streams to request, or null when playback was stopped
+  // during the (asynchronous) codec check; nothing is applied in that case.
   async _processStatus(streams) {
-    await this._context.setStreams(streams);
+    const token = this._runToken;
+    const committed = await this._context.setStreams(streams);
+    if (!committed || token !== this._runToken) return null;
 
     const streamsConfig = this._context.getStreamsConfig();
     for (const stream of streamsConfig) {
@@ -152,8 +185,11 @@ export class SLDPManager {
     }
 
     this._processCurrentStreams();
+    const requested = this._curStreams;
+    this._curStreams = [];
 
     this._eventBus.emit("nimio:connection-established", streamsConfig);
+    return requested;
   }
 
   _processCurrentStreams() {

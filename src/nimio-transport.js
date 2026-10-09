@@ -20,7 +20,8 @@ export const NimioTransport = {
       disconnect: this._onDisconnect.bind(this),
       error: this._onTransportError.bind(this),
     };
-    this._eventBus.on("transp:track-action", this._onTrackAction.bind(this));
+    this._onTrackAction = this._onTrackAction.bind(this);
+    this._eventBus.on("transp:track-action", this._onTrackAction);
   },
 
   _onTrackAction(data) {
@@ -34,20 +35,22 @@ export const NimioTransport = {
   },
 
   _sendPendingAdvertizerActions() {
+    const node = this._audioNode; // the node may be replaced before the reply
+    if (!node) return;
     if (this._advertizerEval.hasPendingActions()) {
       const hdlr = (event) => {
         if (event.data != "transp-discont-eval-ready") return;
         let pa = this._advertizerEval.pendingActions;
         for (let i = 0; i < pa.length; i++) {
-          this._audioNode.port.postMessage({
+          node.port.postMessage({
             type: "transp-track-action",
             data: pa[i],
           });
         }
         this._advertizerEval.clearPendingActions();
-        this._audioNode.port.removeEventListener("message", hdlr);
+        node.port.removeEventListener("message", hdlr);
       };
-      this._audioNode.port.addEventListener("message", hdlr);
+      node.port.addEventListener("message", hdlr);
     }
   },
 
@@ -81,6 +84,7 @@ export const NimioTransport = {
   },
 
   _onVideoSetupReceived(data) {
+    if (this._state.isStopped()) return; // late setup after stop()
     if (!data || !data.config) {
       this._setNoVideo();
       return;
@@ -118,6 +122,7 @@ export const NimioTransport = {
   },
 
   _onAudioSetupReceived(data) {
+    if (this._state.isStopped()) return; // late setup after stop()
     if (!data || !data.config) {
       if (this._noVideo) {
         this._eventBus.emit("aux:playback-error", {
