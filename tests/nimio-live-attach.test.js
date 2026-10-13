@@ -13,7 +13,7 @@ function createLive({ connected, savedState }) {
   live._transport = { connected };
   live._context = { state: { value: savedState } };
   live._sldpManager = { requestCurrentStreams: vi.fn(), start: vi.fn() };
-  live._state = { start: vi.fn() };
+  live._state = { start: vi.fn(), isStopped: () => false };
   live._latencyCtrl = { start: vi.fn() };
   live._isAutoAbr = () => false;
   live._attachUI = vi.fn();
