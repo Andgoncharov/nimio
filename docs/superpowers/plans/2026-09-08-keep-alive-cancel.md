@@ -4,20 +4,21 @@
 
 **Goal:** A genuine (closing) stop while in VOD mode terminates the preserved live session and stops the keep-alive `Cancel`-with-empty-streams loop — without disturbing the deliberate keep-alive preservation used for VOD failover.
 
-**Architecture:** Fix `SLDPManager.stop()` (`src/sldp/manager.js`). On a **closing** stop (`closeConnection === true`), always route through `_sendRequest` so the keep-alive timer is truly cancelled and a `close` command is sent even when no streams are requested. Non-closing (`keepConnection`) stops keep the session and its keep-alive loop intact, as required for statistics. `NimioLive.destroy()` additionally force-cancels keep-alive (always a full teardown). Also rename the misnamed `_onTransportError()` callback to `_onInvalidStatus()`.
+**Architecture:** Fix `SLDPManager.stop()` (`src/sldp/manager.js`). On a **closing** stop (`closeConnection === true`), always route through `_sendRequest` so the keep-alive timer is truly cancelled and a `close` command is sent even when no streams are requested. Non-closing (`keepConnection`) stops keep the session and its keep-alive loop intact, as required for statistics. Also rename the misnamed `_onTransportError()` callback to `_onInvalidStatus()`. Review of PR #90 added two more pieces: the transport worker never calls `send()` on a socket that is not OPEN and never leaves a replaced socket open, and `NimioLive.attach()` reuses a connected transport regardless of the state recorded at detach. `NimioLive.destroy()` is **not** changed here: its unconditional keep-alive teardown ships in PR #92 (`SLDPManager.destroy()`).
 
 **Tech Stack:** Vanilla JS ES modules, Vitest + jsdom, fake timers.
 
 ## Global Constraints
 
-- Changes confined to `src/sldp/manager.js`, `src/nimio-live.js`, `src/nimio-transport.js`, and a new test file `tests/sldp-manager.test.js`.
-- **Statistics/session-continuity constraint (see spec):** keep-alive preserves the server-side viewer session. It must be torn down **only** on a closing stop (user stop / `destroy()`), **never** on the preserve paths (`keepConnection: true`: VOD detach and `_onTransportError()` failover). Do **not** add an unconditional keep-alive cancel to `NimioLive.stop()`.
+- Changes confined to `src/sldp/manager.js`, `src/nimio-transport.js`, `src/transport/web-socket.js`, `src/nimio-live.js` (`attach()` only), and the test files `tests/sldp-manager.test.js`, `tests/nimio-live-failover.test.js`, `tests/web-socket-worker.test.js`, `tests/nimio-live-attach.test.js`.
+- **Statistics/session-continuity constraint (see spec):** keep-alive preserves the server-side viewer session. It must be torn down **only** on a closing stop (user stop / `destroy()`), **never** on the preserve paths (`keepConnection: true`: VOD detach and the `_onInvalidStatus()` failover, formerly `_onTransportError()`). Do **not** add an unconditional keep-alive cancel to `NimioLive.stop()`.
 - Preserve the LIVE→VOD keep-alive behavior used by `NimioLive.detach()`: `stop({ closeConnection: false })` must not close the socket, and a following `keepAliveConnection()` must still re-arm the loop.
 - No new dependencies. Match existing code style in `src/sldp/manager.js`. Keep-alive interval stays 10000 ms. SLDP wire protocol unchanged.
 
-## Background: the wire semantics (verified)
+## Background: the wire semantics (verified at planning time)
 
-`src/transport/web-socket.js` handles the `stop` command as:
+`src/transport/web-socket.js` handled the `stop` command as follows when this
+plan was written (Tasks 5 and 6 change this handler):
 
 ```js
 } else if (type === "stop") {
@@ -52,7 +53,7 @@ if (!isStopped || (closeConnection && this._transport.connected)) {
 calls the manager **only** on a closing stop while connected. That is exactly
 what we want:
 
-- **Preserve paths** (`keepConnection: true` — VOD detach, `_onTransportError`
+- **Preserve paths** (`keepConnection: true` — VOD detach, `_onInvalidStatus`
   failover) skip the manager, so keep-alive keeps running and the server session
   survives for a later return to live. **Intended — must not change.**
 - **Closing stops** (user stop / `destroy()`) reach the manager while the socket
@@ -95,7 +96,7 @@ stop(opts = {}) {
   this._sendRequest("stop", { sns, close });
 }
 
-cancelKeepAlive() {                          // public: also called by NimioLive.destroy()
+cancelKeepAlive() {                          // public; the destroy() teardown lives in PR #92
   if (this._keepAliveTimer) {
     clearTimeout(this._keepAliveTimer);
     this._keepAliveTimer = undefined;
@@ -109,11 +110,32 @@ _sendRequest(command, data) {
 ```
 
 ```js
-// src/nimio-live.js
-destroy() {
-  this.stop();
-  this._sldpManager.cancelKeepAlive();       // full teardown: kill keep-alive unconditionally
-  this._removeUIEventHandlers();
+// src/nimio-live.js — attach(): a connected transport is the preserved session
+this._transport.connected
+  ? this._sldpManager.requestCurrentStreams()
+  : this._sldpManager.start(this._config.streamUrl, this._config.startOffset);
+// (was: `connected && context.state !== STATE.PAUSED`, which opened a second
+//  socket on return-to-live from a paused state and orphaned the first one)
+```
+
+```js
+// src/transport/web-socket.js — start: never leave a replaced socket open
+if (socket) {
+  socket.onclose = undefined;
+  socket.close();
+  socket = undefined;
+  self.postMessage({ aux: true, connected: false });
+}
+socket = new WebSocket(e.data.url, e.data.protocols);
+
+// src/transport/web-socket.js — stop: never send() on a non-OPEN socket
+const sns = e.data.sns;
+const sendCancel = Array.isArray(sns) && (sns.length > 0 || !e.data.close);
+if (sendCancel && socket.readyState === CONN_STATES.OPEN) {
+  socket.send(JSON.stringify({ command: "Cancel", streams: sns }));
+}
+if (e.data.close) {
+  /* unchanged */
 }
 ```
 
@@ -139,9 +161,10 @@ _onInvalidStatus() {                            // was: _onTransportError()
 pending keep-alive instead of only dropping the reference. The only stop that
 does **not** cancel keep-alive is the empty-streams, non-closing early return —
 which is correct, because that is a preserve-style stop that must leave the loop
-alone. `NimioLive.destroy()` force-cancels as a safety net (covers the
-`connected === false` case where the manager would be skipped); the transport
-callback key stays `"error"`, only the JS method name changes.
+alone. The `connected === false` case, where the manager would be skipped by
+`NimioLive.destroy()` → `stop()`, is covered by PR #92's `SLDPManager.destroy()`;
+until it lands the timer clears itself on its next tick. The transport callback
+key stays `"error"`, only the JS method name changes.
 
 ## File Structure
 
@@ -153,12 +176,22 @@ callback key stays `"error"`, only the JS method name changes.
     requested; otherwise send `{ sns, close }` (so a closing stop with no
     streams still cancels keep-alive and closes the socket).
 - **Modify:** `src/nimio-live.js`
-  - `destroy()` — call `this._sldpManager.cancelKeepAlive()` after `this.stop()`.
+  - `attach()` — reuse a connected transport regardless of the recorded
+    PAUSED state (Task 7). `destroy()` is unchanged (see Task 3).
+- **Modify:** `src/transport/web-socket.js`
+  - `stop` — skip the empty Cancel when `close` is set; `send()` only on an
+    OPEN socket (Task 5).
+  - `start` — close a still-live previous socket before replacing it (Task 6).
 - **Modify:** `src/nimio-transport.js`
   - Rename `_onTransportError()` → `_onInvalidStatus()` and update the
     `error:` callback binding in `_initTransport()`.
 - **Create:** `tests/sldp-manager.test.js`
   - Unit tests with a mock transport and Vitest fake timers.
+- **Create:** `tests/web-socket-worker.test.js`
+  - Drives the real worker module with a fake `WebSocket` whose `send()`
+    throws unless OPEN, as the browser's does.
+- **Create:** `tests/nimio-live-attach.test.js`
+  - `attach()` connection reuse vs. fresh start.
 
 ---
 
@@ -432,29 +465,10 @@ Run: `npx vitest run tests/sldp-manager.test.js -t "disconnected"`
 Expected: PASS (public method exists from Task 1). This locks the contract
 before wiring it into `NimioLive`.
 
-- [ ] **Step 3: Wire it into `NimioLive.destroy()`**
-
-In `src/nimio-live.js`:
-
-```js
-destroy() {
-  this.stop();
-  this._sldpManager.cancelKeepAlive();
-  this._removeUIEventHandlers();
-}
-```
-
-- [ ] **Step 4: Run the full suite**
-
-Run: `npx vitest run`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/nimio-live.js tests/sldp-manager.test.js
-git commit -m "Force keep-alive teardown in NimioLive.destroy()"
-```
+- ~~Step 3: Wire it into `NimioLive.destroy()`~~ — **not performed.** The
+  wiring was added and then reverted on this branch (see the banner above) so
+  that PR #92 lands cleanly; #92's `SLDPManager.destroy()` is the force-cancel.
+- ~~Step 4 / Step 5~~ — not applicable.
 
 ---
 
@@ -502,6 +516,63 @@ git commit -m "Rename _onTransportError to _onInvalidStatus"
 
 ---
 
+### Task 5 (PR #90 review): worker must not `send()` on a non-OPEN socket
+
+A closing stop can arrive while a freshly started socket is still CONNECTING
+(`Nimio.stop()` in paused VOD: `attach()` → `start()`, then `stop()`), and
+`send()` throws `InvalidStateError` there, so `close()` was never reached.
+
+**Files:**
+
+- Modify: `src/transport/web-socket.js` (`stop` branch)
+- Create: `tests/web-socket-worker.test.js`
+
+- [x] Failing tests: closing stop with `sns: []` and with streams on a
+      CONNECTING socket closes it without sending and without throwing.
+- [x] Implementation: skip the empty Cancel when `close` is set; `send()` only
+      when `readyState === OPEN`; always reach `close()`.
+- [x] Guards: keep-alive Cancel and Cancel-then-close on OPEN; CLOSING and
+      CLOSED send nothing and do not throw.
+
+---
+
+### Task 6 (PR #90 review): worker must not orphan a replaced socket
+
+`start` overwrote the socket reference; a still-live previous socket stayed
+OPEN on the server and its close was never reported (id mismatch).
+
+**Files:**
+
+- Modify: `src/transport/web-socket.js` (`start` branch)
+- Modify: `tests/web-socket-worker.test.js`
+
+- [x] Failing tests: a second `start` closes the first socket and posts
+      `connected: false`; the full paused-VOD sequence (start, open, keep-alive,
+      start again, closing stop) leaves no created socket open.
+- [x] Implementation: detach `onclose`, close and forget the previous socket
+      before creating the new one.
+
+---
+
+### Task 7 (PR #90 review): `attach()` reuses a connected transport
+
+`attach()` started a fresh connection when the recorded state was PAUSED even
+though the transport was connected, opening a second server session on
+return-to-live from a paused state.
+
+**Files:**
+
+- Modify: `src/nimio-live.js` (`attach()`)
+- Create: `tests/nimio-live-attach.test.js`
+
+- [x] Failing test: connected transport + saved PAUSED → `requestCurrentStreams()`,
+      not `start()`.
+- [x] Implementation: drop the `STATE.PAUSED` test; branch on
+      `this._transport.connected` alone (and drop the unused `STATE` import).
+- [x] Guards: saved PLAYING reuses too; disconnected transport still starts.
+
+---
+
 ## Self-review
 
 - **Spec coverage:**
@@ -511,7 +582,11 @@ git commit -m "Rename _onTransportError to _onInvalidStatus"
     teardown) → satisfied structurally (manager not called on preserve paths) and
     guarded by Task 2 (detach re-arm; non-closing empty stop sends nothing).
   - Desired behavior 4 (stop-with-streams still cancels + closes) → Task 2.
-  - `destroy()` force-teardown (covers `connected === false`) → Task 3.
+  - `destroy()` force-teardown (covers `connected === false`) → delegated to
+    PR #92 (`SLDPManager.destroy()`); Task 3 superseded.
+  - Worker never throws on a closing stop while CONNECTING → Task 5.
+  - Worker never orphans a replaced socket → Task 6.
+  - `attach()` reuses the preserved session from a paused state → Task 7.
   - Naming fix (`_onTransportError` → `_onInvalidStatus`) → Task 4.
 - **Placeholder scan:** none — all steps carry concrete code and commands.
 - **Type consistency:** `cancelKeepAlive()`, `stop(opts)`, `_sendRequest(command, data)`, and the mock transport shape are used identically across tasks.
@@ -522,18 +597,15 @@ git commit -m "Rename _onTransportError to _onInvalidStatus"
   "Invalid or empty status received" log and covers both malformed and empty
   status. Rejected: `_onVoidStatus` (implies empty-only) and `_onBadStatus`
   (vague / HTTP-code connotation).
-- **`destroy()` teardown:** `NimioLive.destroy()` force-cancels keep-alive
-  (Task 3).
+- **`destroy()` teardown:** delegated to PR #92 (`SLDPManager.destroy()`,
+  called from its staged `NimioLive.destroy()`). Not duplicated here to avoid a
+  merge conflict.
+- **`attach()` from a paused state:** reuse the connected transport. Confirmed
+  with the maintainer that return-to-live from a paused state does not rely on
+  the status refresh a fresh `start()` would give.
 - **Test setup:** tests seed the private `_reqStreams` field directly (accepted),
   rather than driving it through the public `requestStream()` path.
 
 ## Open questions for discussion
 
 None — all decisions resolved. Ready to execute.
-
-### Task 5 (from PR #90 review): worker must not `send()` on a CONNECTING socket
-
-- Modify: `src/transport/web-socket.js` (`stop` branch)
-- Test: `tests/web-socket-worker.test.js`
-- Skip the empty Cancel when `close` is set; send any Cancel only when
-  `socket.readyState === OPEN`; always reach `close()`.

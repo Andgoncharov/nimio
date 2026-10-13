@@ -160,6 +160,17 @@ true })` — the VOD detach and the `_onInvalidStatus()` failover — must leave
    - The LIVE→VOD detach flow still keeps the connection alive: `stop()` with
      `closeConnection: false` does not close the socket, and the subsequent
      `keepAliveConnection()` call re-arms the keep-alive loop.
+5. **A closing stop always closes the socket, whatever its state.** The
+   transport worker never calls `send()` on a socket that is not `OPEN`
+   (CONNECTING, CLOSING, CLOSED), so a closing stop that races a fresh
+   connection cannot throw before `close()`.
+6. **Returning the UI to the live player reuses the preserved session.**
+   `NimioLive.attach()` reuses a connected transport regardless of the state
+   recorded at detach time (PLAYING or PAUSED). The worker additionally never
+   leaves a replaced socket open: a `start` while a previous socket is still
+   live closes that socket first. Together these guarantee that no server
+   session is orphaned on the paused-VOD → stop path, and that return-to-live
+   from a paused state does not open a second session.
 
 ## Scope
 
@@ -177,6 +188,19 @@ true })` — the VOD detach and the `_onInvalidStatus()` failover — must leave
     Skip the empty Cancel when `close` is set (it is a no-op right before
     close) and guard any Cancel on `readyState === OPEN`. Found in review of
     PR #90.
+  - `src/transport/web-socket.js` — the worker's `start` handler must not
+    overwrite a still-live socket. It previously replaced the reference without
+    closing the old socket, whose `onclose` then never matched `curSocketId`,
+    so the old server session was orphaned. Close (with `onclose` detached) and
+    forget the previous socket, and post `connected: false`, before opening the
+    new one. Found in review of PR #90.
+  - `src/nimio-live.js` — `attach()` reuses a connected transport regardless
+    of the recorded `PAUSED` state. The old `state !== PAUSED` test opened a
+    second connection on return-to-live from a paused state (and, with the
+    worker bug above, orphaned the first). Confirmed with the maintainer that
+    return-to-live from a paused state does not rely on the status refresh a
+    fresh `start()` would provide, so reuse is correct and keeps the viewer
+    session continuous (Domain constraint). Found in review of PR #90.
   - `NimioLive.destroy()` is **not** changed here. The force-cancel for the
     `connected === false` case (where the manager is skipped by the
     `NimioLive.stop()` guard) is delivered by PR #92 (instance lifecycle),

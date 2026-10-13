@@ -50,6 +50,17 @@ self.onmessage = (e) => {
     //   return;
     // }
 
+    if (socket) {
+      // A start while the previous socket is still live must not orphan it:
+      // the server would keep that session open, and its eventual close
+      // would never be reported (its id no longer matches curSocketId).
+      console.debug(`Replace socket id ${socket.id} with a new connection`);
+      socket.onclose = undefined;
+      socket.close();
+      socket = undefined;
+      self.postMessage({ aux: true, connected: false });
+    }
+
     socket = new WebSocket(e.data.url, e.data.protocols);
     socket.binaryType = "arraybuffer";
     socket.id = ++curSocketId;

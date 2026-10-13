@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const CONNECTING = 0;
 const OPEN = 1;
 const CLOSING = 2;
+const CLOSED = 3;
 
 // Minimal stand-in for the browser WebSocket: send() throws on a socket that
 // is not OPEN, exactly as the WebSocket spec requires.
@@ -106,5 +107,72 @@ describe("transport worker stop command", () => {
 
     expect(socket.sent).toEqual([{ command: "Cancel", streams: [1, 2] }]);
     expect(socket.closeCalls).toBe(1);
+  });
+
+  it("closing stop on a CLOSING socket sends nothing and still calls close()", () => {
+    const socket = startSocket(post);
+    socket.readyState = CLOSING;
+
+    expect(() => post({ type: "stop", sns: [1], close: true })).not.toThrow();
+
+    expect(socket.sent).toEqual([]);
+    expect(socket.closeCalls).toBe(1);
+  });
+
+  it("keep-alive on a CLOSED socket sends nothing and does not throw", () => {
+    const socket = startSocket(post);
+    socket.readyState = CLOSED;
+
+    expect(() => post({ type: "stop", sns: [] })).not.toThrow();
+
+    expect(socket.sent).toEqual([]);
+    expect(socket.closeCalls).toBe(0);
+  });
+});
+
+describe("transport worker start command", () => {
+  let post;
+
+  beforeEach(async () => {
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    post = await loadWorker();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("closes a still-live previous socket before opening a new one", () => {
+    const first = startSocket(post);
+    first.readyState = OPEN;
+    self.postMessage.mockClear();
+
+    const second = startSocket(post);
+
+    expect(second).not.toBe(first);
+    expect(first.closeCalls).toBe(1);
+    expect(first.onclose).toBeFalsy();
+    expect(self.postMessage).toHaveBeenCalledWith({
+      aux: true,
+      connected: false,
+    });
+  });
+
+  it("paused-VOD stop sequence leaves no created socket open", () => {
+    // LIVE -> VOD detach: the session is preserved and kept alive.
+    const preserved = startSocket(post);
+    preserved.readyState = OPEN;
+    post({ type: "stop", sns: [] });
+    expect(preserved.sent).toEqual([{ command: "Cancel", streams: [] }]);
+
+    // Nimio.stop() in paused VOD: attach() starts again, stop() closes.
+    const replacement = startSocket(post);
+    post({ type: "stop", sns: [], close: true });
+
+    for (const socket of FakeWebSocket.instances) {
+      expect(socket.closeCalls, `socket ${socket.id} left open`).toBe(1);
+    }
+    expect(replacement.closeCalls).toBe(1);
   });
 });
