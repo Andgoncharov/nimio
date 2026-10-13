@@ -207,7 +207,7 @@ key stays `"error"`, only the JS method name changes.
 - Consumes: `SLDPManager` constructor `new SLDPManager(instName)` and `init(transport, config)`; a mock transport exposing `connected`, `send(cmd, data)`, `setCallback(type, cb)`, `runCallback(type, data)`.
 - Produces: `SLDPManager.prototype.cancelKeepAlive()` (public); `stop({ closeConnection })` that always routes a closing stop through `_sendRequest`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```js
 // tests/sldp-manager.test.js
@@ -282,12 +282,12 @@ describe("SLDPManager closing stop", () => {
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run tests/sldp-manager.test.js`
 Expected: FAIL — keep-alive keeps arriving after stop, and no `close` command is sent (the current `stop()` early-returns on empty `sns`).
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `src/sldp/manager.js`, add `cancelKeepAlive()` (public) next to `keepAliveConnection()`:
 
@@ -320,12 +320,12 @@ stop(opts = {}) {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run tests/sldp-manager.test.js`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tests/sldp-manager.test.js src/sldp/manager.js
@@ -348,7 +348,7 @@ must leave keep-alive alone, and stops with streams must still cancel + close.
 - Consumes: mock transport and `isKeepAlive` helper from Task 1.
 - Produces: no production changes.
 
-- [ ] **Step 1: Write the guard tests**
+- [x] **Step 1: Write the guard tests**
 
 Add inside the existing `describe` block in `tests/sldp-manager.test.js`:
 
@@ -391,7 +391,7 @@ it("closing stop with requested streams cancels those streams and closes", () =>
 });
 ```
 
-- [ ] **Step 2: Run the file**
+- [x] **Step 2: Run the file**
 
 Run: `npx vitest run tests/sldp-manager.test.js`
 Expected: PASS — behavior preserved by the Task 1 implementation. If any fail,
@@ -401,12 +401,12 @@ the implementation regressed a preserved behavior; fix before continuing.
 > `requestStream()` / `_processCurrentStreams()` populate at runtime and keeps
 > the tests focused on the stop/keep-alive behavior.
 
-- [ ] **Step 3: Run the full suite**
+- [x] **Step 3: Run the full suite**
 
 Run: `npx vitest run`
 Expected: PASS — no other tests broken.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tests/sldp-manager.test.js
@@ -438,7 +438,7 @@ touches the failover path.
 - Consumes: `SLDPManager.prototype.cancelKeepAlive()` from Task 1.
 - Produces: `NimioLive.destroy()` calls `this._sldpManager.cancelKeepAlive()`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add inside the existing `describe` block in `tests/sldp-manager.test.js`. This
 asserts the contract `destroy()` relies on: `cancelKeepAlive()` stops the loop
@@ -459,7 +459,7 @@ it("cancelKeepAlive() stops the loop even when the transport is disconnected", (
 });
 ```
 
-- [ ] **Step 2: Run test to verify it passes at the manager level**
+- [x] **Step 2: Run test to verify it passes at the manager level**
 
 Run: `npx vitest run tests/sldp-manager.test.js -t "disconnected"`
 Expected: PASS (public method exists from Task 1). This locks the contract
@@ -486,13 +486,13 @@ status (no playable source), not a transport failure. No behavior change.
 - Consumes: nothing new.
 - Produces: `NimioTransport._onInvalidStatus()` (replaces `_onTransportError()`).
 
-- [ ] **Step 1: Confirm the only references**
+- [x] **Step 1: Confirm the only references**
 
 Run: `grep -rn "_onTransportError" src/`
 Expected: exactly two hits, both in `src/nimio-transport.js` — the method
 definition and the `error:` binding in `_initTransport()`.
 
-- [ ] **Step 2: Rename**
+- [x] **Step 2: Rename**
 
 In `src/nimio-transport.js`:
 
@@ -502,12 +502,12 @@ In `src/nimio-transport.js`:
 Leave the transport callback key `"error"` and the worker message type
 (`src/sldp/agent.js` posts `{ type: "error" }`) unchanged.
 
-- [ ] **Step 3: Verify no stale references and suite is green**
+- [x] **Step 3: Verify no stale references and suite is green**
 
 Run: `grep -rn "_onTransportError" src/ ; npx vitest run`
 Expected: no matches for `_onTransportError`; full suite PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/nimio-transport.js
@@ -606,6 +606,7 @@ return-to-live from a paused state.
 - **Test setup:** tests seed the private `_reqStreams` field directly (accepted),
   rather than driving it through the public `requestStream()` path.
 
-## Open questions for discussion
+## Status
 
-None — all decisions resolved. Ready to execute.
+Executed on `fix/keepalive-cancel-on-stop` and under review as PR #90. Tasks
+1, 2, 4, 5, 6 and 7 are done; Task 3 is superseded by PR #92.

@@ -159,14 +159,36 @@ describe("transport worker start command", () => {
     });
   });
 
-  it("paused-VOD stop sequence leaves no created socket open", () => {
-    // LIVE -> VOD detach: the session is preserved and kept alive.
+  it("stale handlers of a replaced socket do not act for the new one", () => {
+    const first = startSocket(post);
+    first.readyState = OPEN;
+    // open/message delivery is task-queued, so a handler of the old socket
+    // may still run after the replacement; capture them as the browser would
+    const staleOpen = first.onopen;
+    const staleMessage = first.onmessage;
+
+    const second = startSocket(post);
+    self.postMessage.mockClear();
+
+    staleOpen();
+    staleMessage({ data: "{}" });
+
+    expect(second.readyState).toBe(CONNECTING);
+    expect(self.postMessage).not.toHaveBeenCalled();
+    expect(first.onopen).toBeFalsy();
+    expect(first.onmessage).toBeFalsy();
+  });
+
+  it("second start while the previous socket is live leaves no created socket open", () => {
+    // Defensive: the player no longer does this on the paused-VOD stop path
+    // (attach() reuses a connected transport), but a start that replaces a
+    // live socket must still close it before the closing stop closes the new
+    // one, or the first server session is orphaned.
     const preserved = startSocket(post);
     preserved.readyState = OPEN;
     post({ type: "stop", sns: [] });
     expect(preserved.sent).toEqual([{ command: "Cancel", streams: [] }]);
 
-    // Nimio.stop() in paused VOD: attach() starts again, stop() closes.
     const replacement = startSocket(post);
     post({ type: "stop", sns: [], close: true });
 

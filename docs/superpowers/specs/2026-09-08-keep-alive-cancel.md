@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-08
 **Branch:** `fix/keep-alive-cancel`
-**Status:** Draft for discussion
+**Status:** Implemented — PR #90 (`fix/keepalive-cancel-on-stop`), including the review follow-ups
 
 ## Problem
 
