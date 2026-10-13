@@ -384,6 +384,12 @@ git commit -m "Add regression tests for SLDP preserve-path keep-alive"
 
 ### Task 3: `NimioLive.destroy()` force-cancels keep-alive
 
+> **Superseded.** The `destroy()` wiring was removed from this branch so that
+> PR #92 (instance lifecycle) lands without conflict; #92 adds
+> `SLDPManager.destroy()`, which clears an armed keep-alive timer, and calls it
+> from its staged `NimioLive.destroy()`. Only the `cancelKeepAlive()` method and
+> its unit test from this task remain here.
+
 Belt-and-suspenders for the one closing path that can skip `SLDPManager.stop()`:
 `destroy()` while the socket already reported `connected === false`. `destroy()`
 is always a full teardown, so cancelling keep-alive there is safe and never
@@ -524,3 +530,10 @@ git commit -m "Rename _onTransportError to _onInvalidStatus"
 ## Open questions for discussion
 
 None — all decisions resolved. Ready to execute.
+
+### Task 5 (from PR #90 review): worker must not `send()` on a CONNECTING socket
+
+- Modify: `src/transport/web-socket.js` (`stop` branch)
+- Test: `tests/web-socket-worker.test.js`
+- Skip the empty Cancel when `close` is set; send any Cancel only when
+  `socket.readyState === OPEN`; always reach `close()`.

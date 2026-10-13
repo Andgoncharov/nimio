@@ -168,11 +168,22 @@ true })` — the VOD detach and the `_onInvalidStatus()` failover — must leave
     send `close` even when no streams are requested; make the cancel robust
     (`clearTimeout`, not just dropping the reference); expose a public
     `cancelKeepAlive()`.
-  - `src/nimio-live.js` — `NimioLive.destroy()` force-calls
-    `this._sldpManager.cancelKeepAlive()`. `destroy()` is always a genuine
-    teardown, so this is safe and also covers the case where the socket already
-    reported `connected === false` (the manager would otherwise be skipped by the
-    `NimioLive.stop()` guard). It does **not** touch the failover path.
+  - `src/transport/web-socket.js` — the worker's `stop` handler must not call
+    `socket.send()` on a socket that is not `OPEN`. A closing stop can now
+    arrive while a freshly started socket is still `CONNECTING` (e.g.
+    `Nimio.stop()` in paused VOD: `livePlayer.attach()` calls
+    `sldpManager.start()` and `livePlayer.stop()` follows immediately), and
+    `send()` throws `InvalidStateError` there, so `close()` would never run.
+    Skip the empty Cancel when `close` is set (it is a no-op right before
+    close) and guard any Cancel on `readyState === OPEN`. Found in review of
+    PR #90.
+  - `NimioLive.destroy()` is **not** changed here. The force-cancel for the
+    `connected === false` case (where the manager is skipped by the
+    `NimioLive.stop()` guard) is delivered by PR #92 (instance lifecycle),
+    whose `SLDPManager.destroy()` clears an armed keep-alive timer and is
+    called from the new staged `NimioLive.destroy()`. Keeping it out of this
+    PR avoids a merge conflict with #92. Until #92 lands, a keep-alive armed on
+    an already disconnected transport clears itself on its next tick.
   - `src/nimio-transport.js` — rename the misnamed callback (currently
     `_onTransportError()`) to `_onInvalidStatus()` (see below).
 - **Out of scope:** `NimioVod`/`Nimio` orchestration; the `_onInvalidStatus`
@@ -195,9 +206,9 @@ the worker message type is a broader change, out of scope).
 > keep-alive on the `_onInvalidStatus()` (renamed from `_onTransportError()`)
 > failover path and break the server's viewer statistics (Domain constraint).
 > The teardown stays in `SLDPManager.stop()`, gated on the closing stop, which
-> is reached on genuine stops because keep-alive keeps the socket connected. The
-> one exception is `NimioLive.destroy()`, which force-cancels keep-alive because
-> it is unconditionally a full teardown.
+> is reached on genuine stops because keep-alive keeps the socket connected.
+> The unconditional force-cancel in `NimioLive.destroy()` lives in PR #92
+> (`SLDPManager.destroy()`), not in this change.
 
 ## Constraints
 

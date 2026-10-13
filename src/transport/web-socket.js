@@ -98,11 +98,17 @@ self.onmessage = (e) => {
       }),
     );
   } else if (type === "stop") {
-    if (e.data.sns && e.data.sns.length >= 0) {
+    const sns = e.data.sns;
+    // An empty Cancel right before close is a no-op, so skip it: a closing
+    // stop may arrive while the socket is still CONNECTING, where send()
+    // throws and close() would never be reached. The readyState guard
+    // covers the same race for a non-empty Cancel.
+    const sendCancel = Array.isArray(sns) && (sns.length > 0 || !e.data.close);
+    if (sendCancel && socket.readyState === CONN_STATES.OPEN) {
       socket.send(
         JSON.stringify({
           command: "Cancel",
-          streams: e.data.sns,
+          streams: sns,
         }),
       );
     }
