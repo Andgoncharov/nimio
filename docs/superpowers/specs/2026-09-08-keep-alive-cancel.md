@@ -1,7 +1,7 @@
 # Spec: Terminate the live keep-alive when the player is stopped in VOD mode
 
 **Date:** 2026-09-08
-**Branch:** `fix/keep-alive-cancel`
+**Branch:** `fix/keep-alive-cancel` (development history); squashed onto `fix/keepalive-cancel-on-stop` for PR #90
 **Status:** Implemented — PR #90 (`fix/keepalive-cancel-on-stop`), including the review follow-ups
 
 ## Problem
@@ -191,9 +191,14 @@ true })` — the VOD detach and the `_onInvalidStatus()` failover — must leave
   - `src/transport/web-socket.js` — the worker's `start` handler must not
     overwrite a still-live socket. It previously replaced the reference without
     closing the old socket, whose `onclose` then never matched `curSocketId`,
-    so the old server session was orphaned. Close (with `onclose` detached) and
-    forget the previous socket, and post `connected: false`, before opening the
-    new one. Found in review of PR #90.
+    so the old server session was orphaned. Close and forget the previous
+    socket, and post `connected: false`, before opening the new one. Because
+    open/message delivery is task-queued, a queued event of the replaced socket
+    may still run after the replacement: its `onopen`, `onmessage` and
+    `onclose` are cleared on replacement, and every handler is bound to its own
+    socket and returns unless that socket is still the current one, so a stale
+    event can neither report the new socket as connected nor feed its protocol
+    agent. Found in review of PR #90.
   - `src/nimio-live.js` — `attach()` reuses a connected transport regardless
     of the recorded `PAUSED` state. The old `state !== PAUSED` test opened a
     second connection on return-to-live from a paused state (and, with the

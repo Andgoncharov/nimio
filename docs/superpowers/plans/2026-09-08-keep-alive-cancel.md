@@ -119,14 +119,26 @@ this._transport.connected
 ```
 
 ```js
-// src/transport/web-socket.js — start: never leave a replaced socket open
+// src/transport/web-socket.js — start: never leave a replaced socket open,
+// and never let its queued events act for the new one
 if (socket) {
-  socket.onclose = undefined;
+  socket.onopen = socket.onmessage = socket.onclose = undefined;
   socket.close();
   socket = undefined;
   self.postMessage({ aux: true, connected: false });
 }
-socket = new WebSocket(e.data.url, e.data.protocols);
+const ws = new WebSocket(e.data.url, e.data.protocols);
+ws.id = ++curSocketId;
+socket = ws;
+ws.onmessage = (wsEv) => {
+  if (ws !== socket) return; /* unchanged */
+};
+ws.onopen = () => {
+  if (ws !== socket) return; /* unchanged */
+};
+ws.onclose = (wsEv) => {
+  /* unchanged: keyed on wsEv.target.id === curSocketId */
+};
 
 // src/transport/web-socket.js — stop: never send() on a non-OPEN socket
 const sns = e.data.sns;
@@ -539,7 +551,10 @@ A closing stop can arrive while a freshly started socket is still CONNECTING
 ### Task 6 (PR #90 review): worker must not orphan a replaced socket
 
 `start` overwrote the socket reference; a still-live previous socket stayed
-OPEN on the server and its close was never reported (id mismatch).
+OPEN on the server and its close was never reported (id mismatch). Its
+`onopen`/`onmessage` closures also read the module-level `socket`, so a queued
+event of the replaced socket (open/message delivery is task-queued) could report
+the new socket as connected or feed the new protocol agent.
 
 **Files:**
 
@@ -547,10 +562,14 @@ OPEN on the server and its close was never reported (id mismatch).
 - Modify: `tests/web-socket-worker.test.js`
 
 - [x] Failing tests: a second `start` closes the first socket and posts
-      `connected: false`; the full paused-VOD sequence (start, open, keep-alive,
-      start again, closing stop) leaves no created socket open.
-- [x] Implementation: detach `onclose`, close and forget the previous socket
-      before creating the new one.
+      `connected: false`; a second start while the previous socket is live
+      (start, open, keep-alive, start again, closing stop) leaves no created
+      socket open — defensive, since Task 7 removed the player's only path that
+      did this; stale `onopen`/`onmessage` of the replaced socket post nothing
+      and leave the new socket CONNECTING.
+- [x] Implementation: clear `onopen`, `onmessage` and `onclose` on the previous
+      socket, close and forget it before creating the new one; bind each
+      handler to its own socket and return unless it is still the current one.
 
 ---
 
@@ -608,5 +627,6 @@ return-to-live from a paused state.
 
 ## Status
 
-Executed on `fix/keepalive-cancel-on-stop` and under review as PR #90. Tasks
-1, 2, 4, 5, 6 and 7 are done; Task 3 is superseded by PR #92.
+Executed on `fix/keep-alive-cancel` (development history) and squashed onto
+`fix/keepalive-cancel-on-stop` for PR #90, now under review. Tasks 1, 2, 4, 5,
+6 and 7 are done; Task 3 is superseded by PR #92.
