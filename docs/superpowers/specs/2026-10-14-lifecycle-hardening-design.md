@@ -46,9 +46,17 @@ VOD engine removes a pending or failed hls.js script tag.
   timers, re-checks after `nimio:play` / `nimio:connection-started` /
   `nimio:playback-start`, unconditional overlay and grabber release,
   reconnector reset on detach, the null-flow guard in
-  `_onAudioCodecDataReceived()` (PR 3b).
+  `_onAudioCodecDataReceived()` (PR 3b). One engine change is made here:
+  `NimioLive.destroy()` runs its stages in isolation (see §3), because the
+  facade's promise that destruction completes is hollow if a throwing
+  `nimio:playback-end` listener can skip the transport worker termination
+  (found in review).
 - Instance name collision warnings: upstream #95's silent
   `allocateInstanceKey()` stays.
+- The native video Picture-in-Picture path (`_toggieVideoPip`) has no
+  generation guard; §8 covers Document PiP only. A native PiP grant in the
+  frame between a click and destroy leaves a window of the detached video
+  open until the user closes it (PR 3b).
 - An explicit `removeAllListeners()` step: the event bus's release hook (#95)
   already drops every listener, application ones included, when
   `releaseInstances()` runs.
@@ -101,11 +109,11 @@ _rollbackInit() {
     ["live player", () => this._livePlayer?.destroy()],
     ["VU meter", () => this._vuMeterSvc?.clear()],
     ["UI", () => this._ui?.destroy()],
+    ["services", () => releaseInstances(this._instName)],
   ]);
   this._vodPlayer = this._livePlayer = this._ui = undefined;
   this._vuMeterSvc = undefined;
   this._destroyed = true;
-  releaseInstances(this._instName);
 }
 ```
 
@@ -115,6 +123,9 @@ _rollbackInit() {
 destroy() {
   if (this._destroyed) return;
   this._destroyed = true;
+  // a listener invoked during the teardown (nimio:playback-end from the
+  // live stop) must not be able to restart or steer the engines
+  this._actPlayer = undefined;
 
   // every component is torn down independently: one failure must not
   // leave the others running, and the name is always released
@@ -132,10 +143,10 @@ destroy() {
         this._eventBus.off("aux:playback-error", this._onError);
       },
     ],
+    // last, as live and VOD players share services (e.g. AudioContext);
+    // the event bus release also drops the application's listeners
+    ["services", () => releaseInstances(this._instName)],
   ]);
-  // last, as live and VOD players share services (e.g. AudioContext); the
-  // event bus release also drops the application's listeners
-  releaseInstances(this._instName);
 
   this._ui = undefined;
   this._vodPlayer = undefined;
@@ -156,7 +167,26 @@ destroy() {
 
 Order: UI first (no more user input), VOD before live (shared media element
 and services), live last among the engines, then the facade's own
-subscriptions.
+subscriptions, then the service release as its own isolated step so a
+throwing service `destroy()` can neither leave the references set nor mask
+an earlier error (found in review).
+
+`NimioLive.destroy()` uses the same helper: stop, media resources, UI
+handlers, transport handlers, sync-mode handler, reconnector, SLDP manager,
+transport, each isolated, first error rethrown afterwards. The media
+resources stage (`_releaseMediaResources()`) destroys any remaining decoder
+flows, stops audio, the grabber and the metrics overlay, each idempotent:
+`_resetPlayback()` destroys the flows last, so a VU meter stop that throws
+(the host emptied its container) used to leave the decoder workers alive
+with no way to reach them again (found in review). The stage also cancels the
+pause timer, stops the playback state (which ends the render loop) and
+hard-stops ABR, for a stop that threw before reaching them. Without the
+isolated stages a `nimio:playback-end` listener that throws (the emit is the last statement of the closing stop)
+aborted the engine before the transport worker was terminated, and the
+facade, having caught the error and cleared its reference, could never
+finish that cleanup (found in review). `_switchMode()` and the facade's
+`aux:playback-error` handler return early on a destroyed facade for the same
+reason.
 
 ### 4. Public methods after destroy
 
@@ -178,7 +208,9 @@ via `?.`; the `_runVodFromStart()` promise continuation returns when
 `src/nimio-events.js`: every method returns when `!this._eventBus`
 (`listeners` → `[]`, `listenerCount` → `0`).
 
-`src/nimio-volume.js`: `this._audioVolumeCtrl?.x()`.
+`src/nimio-volume.js`: every public method returns at once when `_destroyed`.
+The volume is persisted per storage key, so a listener invoked during the
+teardown must not be able to change it for later players (found in review).
 
 ### 5. UI (`src/ui/ui.js`)
 
@@ -215,14 +247,47 @@ this._closeAbrMenu(); this._eventBus.on("aux:caption-list-open",
 this._onCaptionListOpen);` and `destroy()` removes it.
 - `destroy()`: `this._resizeObserver.disconnect()` instead of `unobserve`;
   the container is removed via `this._container.parentNode?.removeChild(...)`.
+- The rollback also releases the seek bar (`_removeSeekBar()`), so the
+  playback progress service does not keep a UI from a failed construction
+  (found in review).
+- `_onPlaybackPositionChange` returns `false` on a destroyed facade (found
+  in review).
 
 ### 6. VOD script tag (`src/nimio-vod.js`)
 
 `_addScriptTag()` assigns `this._playerScript = script` before appending it;
 the load continuation no longer assigns it. `destroy()` calls
 `_removePlayerScript()` first: null `onload`/`onerror`, remove the element
-from its parent if any, forget it. The existing removal in `_clear()` is
-replaced by the same call.
+from its parent if any, forget it. The former removal at the end of
+`destroy()` (which only ran for a loaded script) is dropped.
+
+### 7. Service release finishes the loop (`src/shared/service.js`)
+
+`releaseInstances()` released services in registration order and stopped at
+the first `destroy()` that threw (a VU meter whose external container the
+host had emptied), leaving every later service registered under the key
+although the facade had already cleared its references. It now isolates each
+service's release, finishes the loop and rethrows the first error, which the
+facade's "services" step logs and rethrows after cleanup (found in review).
+
+### 8. Pending Document Picture-in-Picture request (`src/ui/ui-pip.js`)
+
+`_toggleDocumentPip()` awaits `requestWindow()`. If `_cleanupPip()` ran
+meanwhile (the UI was destroyed), the continuation used to move the player
+into the new window, install another observer and listener, then throw on the
+cleared message element, leaving the window open. `_cleanupPip()` bumps a
+request generation; a completion whose generation is stale closes the window
+and installs nothing (found in review; pre-existing gap).
+
+### 9. VU meter UI stops animating before it touches the DOM (`src/vumeter/ui.js`)
+
+`VUMeterUI.destroy()` removed its generated elements first and cleared the
+`_fullValue` flag afterwards. When the host had already emptied the meter's
+inner DOM, the first `removeChild()` threw, the flag stayed set, and
+`_drawMeter()` kept scheduling animation frames after the player was gone.
+The flag and the element lists are now cleared first; elements are removed
+only if they are still children of the meter, and the meter is removed from
+whatever parent it has (found in review; pre-existing gap).
 
 ## Error handling
 
@@ -254,6 +319,26 @@ replaced by the same call.
 - `tests/browser/ui-integration.test.js`: destroy tolerates a container the
   host removed; a constructor failure leaves no DOM; a constructor failure
   after captions were set up deinitialises them.
+
+Review follow-ups (plan Tasks 6–10):
+
+- `tests/nimio-live.test.js`: `NimioLive.destroy()` with a throwing `stop()`
+  still releases everything and rethrows, with only the stop stage logged; the
+  media stage destroys the flows, stops audio, cancels the pause timer, stops
+  the state and hard-stops ABR when `stop()` failed before reaching them.
+- `tests/nimio.test.js`: a teardown listener calling `play()`,
+  `setParameters()`, `setVolume()`, `mute()` touches no engine or controller;
+  a throwing service release still clears the references and is rethrown; a
+  playback position change after destroy is ignored.
+- `tests/service.test.js`: a throwing `destroy()` does not stop the other
+  releases and is rethrown.
+- `tests/ui-pip-lifecycle.test.js` (new): a Document PiP window granted after
+  `_cleanupPip()` is closed and nothing is installed; a grant while alive is
+  used as before.
+- `tests/vumeter-ui.test.js` (new): `destroy()` stops the animation loop and
+  does not throw when the host removed the meter's children or the meter.
+- `tests/browser/ui-integration.test.js`: a destroyed UI tolerates the live
+  engine's late `clear()` and `hideControls()`.
 
 Suite-level: `npx vitest run`, `npm run prettier:check`; `npm run
 test:browser` for the UI cases.

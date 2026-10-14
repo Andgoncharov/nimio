@@ -12,7 +12,10 @@
 
 ## Global Constraints
 
-- Branch `fix/lifecycle-hardening`, stacked on PR 2b's code branch `fix/live-after-stop-guards-pr` (`9ae6ca5`). No changes to `src/nimio-live.js`, `src/nimio-transport.js` or the SLDP manager (PR 3b).
+- Branch `fix/lifecycle-hardening`, stacked on PR 2b's code branch
+  `fix/live-after-stop-guards-pr` (`9ae6ca5`). No changes to
+  `src/nimio-transport.js` or the SLDP manager (PR 3b); `src/nimio-live.js`
+  changes only in `destroy()` (isolated stages, spec §3, Task 7).
 - Upstream's `allocateInstanceKey()` stays; no name-collision warning; no explicit `removeAllListeners()` step (the event bus release hook drops listeners).
 - Project rule: **one code commit at the end** (Task 5). Earlier tasks only `git add`. Spec/plan commits stay local.
 - `npx prettier --check src tests` and `npx vitest run` must be clean before the commit. `npm run test:browser` for Task 2; if the browser provider is unavailable on this machine, record it in the ledger and say so in the final report.
@@ -1156,6 +1159,53 @@ MSG
 PR title: "Make player destruction idempotent and failure-safe". Depends on PR 2b, 2a and 1. PR 3b (live engine after destroy) remains.
 
 ---
+
+### Task 6 (branch review, done)
+
+- [x] `releaseInstances()` runs as the last isolated step of both
+      `destroy()` and `_rollbackInit()`; a throwing service release still
+      clears the references and is rethrown (test added).
+- [x] `_onPlaybackPositionChange` returns `false` after destroy (test added).
+- [x] UI rollback releases the seek bar; a destroyed UI tolerates the live
+      engine's late `clear()` / `hideControls()` (browser test added).
+- [x] Duplicate `_removePlayerScript()` call at the end of `NimioVod.destroy()`
+      removed (there is no `_clear()`; the plan's Task 3 wording was wrong).
+
+### Task 7 (maintainer-side review, done)
+
+- [x] `NimioLive.destroy()` runs its stages through `runCleanupSteps()` and
+      rethrows after releasing everything (test: throwing `stop()` still
+      terminates the transport).
+- [x] `Nimio.destroy()` drops `_actPlayer` first; `setParameters()`,
+      `_switchMode()` and the `aux:playback-error` handler return early when
+      destroyed (test: `play()` / `setParameters()` from a
+      `nimio:playback-end` listener touch no engine).
+- [x] `releaseInstances()` finishes the loop and rethrows the first error
+      (test in `tests/service.test.js`).
+- [x] `_toggleDocumentPip()` closes a window granted after `_cleanupPip()`
+      and installs nothing (new `tests/ui-pip-lifecycle.test.js`).
+
+### Task 8 (maintainer-side review, done)
+
+- [x] `NimioLive.destroy()` gains an isolated `_releaseMediaResources()`
+      stage after `stop()` (flows, audio, grabber, overlay), tested with a
+      `stop()` that throws before the flows are reached.
+- [x] Volume methods return early on `_destroyed`; the teardown-listener test
+      also calls `setVolume()` / `mute()`.
+
+### Task 9 (final inspection, done)
+
+- [x] `_releaseMediaResources()` also cancels the pause timer, stops the
+      playback state and hard-stops ABR (test extended); the stray `?.` on
+      `_decoderFlows` dropped.
+- [x] Commit message's Tests paragraph lists the round 2/3 tests; spec §3
+      wording fixed; native PiP asymmetry recorded in the spec's non-goals.
+
+### Task 10 (maintainer-side review, done)
+
+- [x] `VUMeterUI.destroy()` invalidates the animation loop before the
+      fallible DOM removal and tolerates missing children (new
+      `tests/vumeter-ui.test.js`).
 
 ## Self-review
 
