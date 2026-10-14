@@ -12,7 +12,12 @@
 
 ## Global Constraints
 
-- Branch `fix/live-after-stop-guards`, stacked on PR 2a's code branch `fix/media-after-stop-guards-pr` (`2e7a7da`). Do not touch the SLDP manager, the transport session or `DecoderFlow` beyond calling what PR 2a shipped.
+- Branch `fix/live-after-stop-guards`, stacked on PR 2a's code branch
+  `fix/media-after-stop-guards-pr` (`2e7a7da`). Do not touch the transport
+  session or `DecoderFlow` beyond calling what PR 2a shipped. The SLDP manager
+  changes only for the per-track setup timers: `requestStream()` keys them by
+  stream number, `cancelStream()` clears its own, `_cancelSetupTimer()` is new
+  (spec §6a, Task 9).
 - No facade (`src/nimio.js`) or UI changes (PR 3).
 - Project rule: **one code commit at the end** (Task 7). Earlier tasks only `git add`. Spec/plan commits stay local.
 - `npx prettier --check src tests` and `npx vitest run` must be clean before the commit.
@@ -22,7 +27,7 @@
 
 - `_initAudioProcessor()` cancelled by a stop **and restarted** before the old module load settles: the old continuation must not create a node on the new run → Task 1 test "init cancelled ... restarted".
 - `_startNoAudioMode()` when no node exists yet (stream without audio at start): must still initialise the idle processor → Task 1 test "no-audio mode initialises when no node exists".
-- `detach()` with `sessionReady === false` must not emit `nimio:playback-end` → Task 5 test asserts the bus saw no such emit.
+- `detach()` with `sessionReady === false` must not emit `nimio:playback-end` → structurally guaranteed by the non-closing engine stop; Task 5's test pins that `stop({ keepConnection: true })` is what is called (the emit assertion was dropped in Task 8 as vacuous against a stubbed `stop()`).
 - `VUMeterService.clear()` called twice, and a module failing after `clear()`: no error log, no re-init → Task 4 tests.
 - Main-track incompatible header with `_nextRenditionData` set but no `decoderFlow` yet (setup not received): no throw, switch failed, stream cancelled → Task 6 test.
 
@@ -1107,6 +1112,25 @@ MSG
 PR title: "Guard the live engine after stop and release its services on destroy". Depends on PR 2a and PR 1. PR 3 (facade and UI) remains.
 
 ---
+
+### Task 8 (branch review, done)
+
+- [x] `setCurrentRendition()` records `type`; the main-track incompatible
+      branch fails only a pending **audio** switch (a pending video switch
+      continues); tests for the video case and for the recorded type.
+- [x] `detach()` closes an uncommitted session only when the transport is
+      connected (no "closed socket" warning); test added.
+- [x] Dropped a vacuous `nimio:playback-end` assertion in the detach tests;
+      corrected the stale-start-ts comment (audio output re-preparation also
+      bumps the generation).
+
+### Task 9 (maintainer-side review, done)
+
+- [x] `_sendPendingAdvertizerActions()` captures `_audioInitGen`; a stale
+      readiness reply only removes its listener and leaves the pending actions
+      to the new run (test in `tests/nimio-live-audio.test.js`).
+- [x] `SLDPManager` setup timers keyed by stream number; `cancelStream(sn)`
+      clears that track's timer (test in `tests/sldp-manager-run.test.js`).
 
 ## Self-review
 

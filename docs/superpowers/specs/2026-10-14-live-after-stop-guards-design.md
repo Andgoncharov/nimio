@@ -4,7 +4,7 @@
 **Branch:** `fix/live-after-stop-guards`, stacked on PR 2a's code branch
 `fix/media-after-stop-guards-pr` (`2e7a7da`), which sits on PR 1's
 `fix/worker-termination-pr` (`efe8964`) and upstream `main` (`f2d6eea`).
-**Status:** Approved design, awaiting implementation plan
+**Status:** Implemented on `fix/live-after-stop-guards` (code commit on top of PR 2a), including the review follow-ups in the plan's Tasks 8 and 9
 **Origin:** PR 2b of the series replacing PR #92. PR 1 terminates workers;
 PR 2a guards the media path after stop; PR 3 hardens the facade and UI.
 
@@ -59,8 +59,10 @@ rendition left pending when the main audio flow is torn down mid-switch.
   `detach()`, `play()`/`attach()` re-checking after their emits (PR 3).
 - UI: observer disconnect, caption-list handler, removed container, rollback
   (PR 3).
-- Any change to the SLDP manager, the transport session or the decoder flow
-  beyond what PR 2a shipped.
+- Any change to the transport session or the decoder flow beyond what PR 2a
+  shipped. The SLDP manager changes only for the per-track setup timers:
+  `requestStream()` keys them by stream number, `cancelStream()` clears its
+  own, `_cancelSetupTimer()` is new (see §6a).
 
 ## Design
 
@@ -121,7 +123,11 @@ if (!this._audioContext || !this._audioNode) {
 
 - `_sendPendingAdvertizerActions()` (`src/nimio-transport.js`): capture
   `const node = this._audioNode; if (!node) return;` and use `node.port` in
-  the handler and its removal.
+  the handler and its removal. The handler also captures `_audioInitGen` and,
+  if it changed by the time the readiness reply arrives (a reply queued before
+  a stop, delivered after a restart), only removes itself: it must neither
+  post to the old node nor clear the pending actions, which now belong to the
+  new run's worklet (found in review).
 
 ### 2. Setups while stopped (`src/nimio-transport.js`)
 
@@ -192,8 +198,9 @@ detach(callback) {
   if (this._sldpManager.sessionReady) {
     // the session has stream metadata: keep it for a later attach()
     this._sldpManager.keepAliveConnection();
-  } else {
-    // nothing to reuse (attach() would handshake anyway): close it now
+  } else if (this._transport.connected) {
+    // nothing to reuse (attach() would handshake anyway): close it now;
+    // a socket that never opened is replaced by attach()'s start()
     this._sldpManager.stop({ closeConnection: true });
   }
   // ...
@@ -201,7 +208,10 @@ detach(callback) {
 ```
 
 The engine stop stays non-closing so `nimio:playback-end` is not emitted on a
-mode switch. Closing through the manager sends `stop/close` with no streams;
+mode switch. A socket that is not connected (never opened, or already closed)
+is left alone: sending a close would only make the worker warn about a closed
+socket, and `attach()`'s `start()` replaces a still-connecting one (found in
+review). Closing through the manager sends `stop/close` with no streams;
 the worker closes the socket and reports disconnected. The statistics
 constraint concerns sessions that played; an uncommitted session never did.
 
@@ -213,9 +223,10 @@ this._sldpManager.cancelStream(data.trackId); this._context.resetCurrentStream("
 gains:
 
 ```js
-if (this._nextRenditionData) {
-  // the main flow's destroy already unpaired the next flow; without a main
-  // flow the switch can never finalize, so fail it now
+if (this._nextRenditionData?.type === "audio") {
+  // the main flow's destroy already unpaired the next audio flow; without a
+  // main flow the switch can never finalize, so fail it now (a pending video
+  // switch is unaffected and continues)
   const next = this._nextRenditionData;
   next.decoderFlow?.destroy();
   this._sldpManager.cancelStream(next.trackId);
@@ -224,9 +235,23 @@ if (this._nextRenditionData) {
 ```
 
 `next.decoderFlow` may not exist yet (setup not received); `destroy()` is
-idempotent. Nothing reports twice: the main flow's destroy made the next flow
+idempotent. `setCurrentRendition()` now records `type` in `_nextRenditionData`:
+ABR and the UI only ever switch video, so without the gate a pending video
+switch, still healthily paired with the main video flow, would have been
+aborted and the engine would then have reported `audio` on a cleared
+`_nextRenditionData` (found in review). Nothing reports twice: the main flow's destroy made the next flow
 forget the pairing without a report (src side), and the main flow itself is
 destroyed, not notified.
+
+### 6a. `cancelStream()` cancels the track's queued setup (`src/sldp/manager.js`)
+
+`requestStream()` queues the `videoSetup`/`audioSetup` callback with a
+`setTimeout(0)`. PR 2a tracked those timers only for stop/destroy. When §6
+cancels a next track whose setup had not arrived yet, the timer stayed armed;
+after `_nextRenditionData` was cleared, the callback saw no main audio flow
+and created one for the cancelled track (found in review). The timers are now
+keyed by stream number, and `cancelStream(sn)` clears that track's timer
+before sending the Cancel. Other tracks' setups are unaffected.
 
 ## Error handling
 
@@ -248,17 +273,25 @@ destroyed, not notified.
   eval-ready reply uses the node it was registered on; no-audio mode keeps an
   existing node and context.
 - `tests/nimio-live.test.js`: setups ignored while stopped; `destroy()`
-  removes the sync-mode listener; `detach()` keeps alive when `sessionReady`
-  and closes through the manager when not, without emitting
-  `nimio:playback-end`.
+  removes the sync-mode listener; `detach()` keeps alive when `sessionReady`,
+  closes through the manager when not and the transport is connected, and
+  sends nothing when it is not. (The engine stop stays non-closing, which is
+  what keeps `nimio:playback-end` from being emitted; the test documents that
+  rather than asserting on a stubbed `stop()`.)
 - `tests/nimio-transport-switch.test.js`: main-track incompatible update with
-  a pending next rendition destroys the next flow, cancels its stream and
-  reports the switch failed once; without a pending rendition nothing extra
-  happens.
+  a pending next audio rendition destroys the next flow, cancels its stream
+  and reports the switch failed once, also when its setup has not arrived;
+  a pending video switch is left alone; without a pending rendition nothing
+  extra happens; `setCurrentRendition()` records the switch type.
 - `tests/metrics-manager.test.js`, `tests/audio-graph-controller.test.js`,
   `tests/vumeter-service.test.js` (new): as in PR #92's references; the VU
   meter test drives a real `VUMeterService` with a fake `AudioContext` whose
   module load settles or fails after `clear()`.
+
+Review follow-ups: a stale advertizer readiness reply after a generation bump
+posts nothing, clears nothing and removes its listener
+(`tests/nimio-live-audio.test.js`); `cancelStream()` cancels that track's
+queued setup and leaves others armed (`tests/sldp-manager-run.test.js`).
 
 Suite-level: `npx vitest run`, `npm run prettier:check`.
 
