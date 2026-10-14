@@ -152,7 +152,8 @@ _scheduleAutoplay() {
 }
 
 _cancelAutoplay() {
-  for (const id of this._autoplayTimers) clearTimeout(id);
+  // tolerates a rollback from before _init() reached the timers
+  for (const id of this._autoplayTimers || []) clearTimeout(id);
   this._autoplayTimers = [];
 }
 ```
@@ -234,8 +235,8 @@ async _toggieVideoPip(ev) {
 }
 ```
 
-`_cleanupPip()`, after bumping the generation: if
-`document.pictureInPictureElement === this._mediaElement`, call
+`_cleanupPip()`, after bumping the generation: if the media element exists
+and `document.pictureInPictureElement === this._mediaElement`, call
 `document.exitPictureInPicture().catch(() => {})`, so a destroyed player's
 native PiP window closes instead of showing a dead video.
 
