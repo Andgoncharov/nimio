@@ -1109,6 +1109,36 @@ the PRs replacing #92; PR 2b (live engine audio init, service hooks) and PR 3
 
 ---
 
+### Task 7 (review follow-ups, done): findings from the branch review and the maintainer-side review
+
+- [x] `_onPeerDestroyed()` escalates to `onDecodingError(type)` when the main
+      flow's input was already cancelled (`processChunk()`) or it already
+      posted its own shutdown (`finalizeSwitch()`).
+- [x] `PlaybackContext.cancelPendingStreams()`; the manager calls it on every
+      stop and on `destroy()`, so a stop during the codec check commits
+      nothing (real-context tests in `tests/sldp-manager-run.test.js` and
+      `tests/playback-context.test.js`).
+- [x] Status callback captures the run token before the sync-mode emit and
+      re-checks after it.
+- [x] Transport session: adapter numbers each `start`, worker hands it to the
+      agent, agent tags every post, adapter drops stale tagged messages
+      (`tests/transport-adapter.test.js`, `tests/transport-web-socket.test.js`,
+      new `tests/sldp-agent.test.js`).
+- [x] `_handleDecodedFrame()` post-await guard includes `_destroyed`;
+      `flow-audio.js` / `flow-video.js` `_handleDecoderOutput()` return after
+      the await when destroyed.
+- [x] Worker lifecycle notifications (`connected`, `disconnect`) carry the
+      socket's session; the adapter drops stale ones.
+- [x] `_failSwitch(msg, lostDecoder)` is the single owner of a failed switch
+      on the main flow; the gap abort recovers when the input was cancelled;
+      the adoption guard escalates (no decoder left).
+- [x] `_onAudioCodecDataReceived()` reports an incompatible-update failure
+      only when the peer notification did not already (`_nextRenditionData`
+      still set); new `tests/nimio-transport-switch.test.js`.
+- [x] `SLDPManager.sessionReady` (false from `start()`/`destroy()`, true once
+      a status committed); `attach()` reuses the socket only then, else it
+      handshakes again (detach during the codec check cancels the commit).
+
 ## Self-review
 
 - **Spec coverage:** §1 → Task 1; §2 → Task 2; §3 → Task 3; §4 → Task 4; §5 → Task 5; Error handling → Task 4 (throwing handler) and Task 5 (`?.` on the callback, idempotent destroy); Testing list → Tasks 1–5; Delivery → Task 6.
