@@ -10,6 +10,18 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-14-live-after-destroy-design.md`
 
+> **Post-review note:** the spec was revised after the branch review and
+> supersedes this plan where they differ: `attach()` returns `false` only
+> when a listener destroyed the player (a stopping listener leaves it
+> attached and stopped); a playback generation (`_playGen`,
+> `_isInterrupted()`, `_startRenderLoop()`) replaces the plain state
+> re-checks and gives each render loop an identity; `setParameters()` and
+> `setCurrentRendition()` are guarded, the latter also after its emit and
+> at entry on a stopped engine. The PR 92 coverage check (spec section 8)
+> added `src/media/decoders/flow.js` (isolated destroy steps),
+> `src/nimio-renditions.js`, README text and three test files beyond the
+> Global Constraints below.
+
 ## Global Constraints
 
 - Branch `fix/live-after-destroy`, stacked on PR 3a's code branch `fix/lifecycle-hardening-pr` (`1ac05c2`). Only `src/nimio-live.js`, `src/nimio-transport.js`, `src/ui/ui-pip.js`, `src/vumeter/ui.js` and tests change. No facade, SLDP manager, decoder flow or service registry changes.
@@ -236,15 +248,22 @@ describe("NimioLive.attach() with a listener that ends playback", () => {
     vi.unstubAllGlobals();
   });
 
-  it("a nimio:connection-started listener that stops the player makes attach() return false", () => {
+  it("a nimio:connection-started listener that stops the player leaves the engine attached and stopped", () => {
+    // like the pbError path: attached-and-stopped is a legitimate outcome the
+    // application asked for; returning false would make the facade believe
+    // the engine never took the UI, leaving it un-attachable afterwards
     const { live, flags } = createEngine();
+    delete live._attachUI; // the real one: records the UI
+    const ui = { toggleMode: vi.fn(), setDetached: vi.fn() };
     live._sldpManager.start = vi.fn(() => (flags.stopped = true));
     const callback = vi.fn();
 
-    expect(live.attach({}, { latency: 0 }, callback)).toBe(false);
+    expect(live.attach(ui, { latency: 0 }, callback)).toBe(true);
 
+    expect(live._ui).toBe(ui);
+    expect(callback).toHaveBeenCalledTimes(1);
     expect(live._debugView.start).not.toHaveBeenCalled();
-    expect(callback).not.toHaveBeenCalled();
+    expect(live.attach(ui, { latency: 0 })).toBe(false); // already attached
   });
 
   it("a nimio:connection-started listener that destroys the player makes attach() return false", () => {
