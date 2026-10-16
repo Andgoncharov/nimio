@@ -64,6 +64,9 @@ stop() {
   // running covers both the attached VOD engine (VOD mode) and the warm,
   // detached one that reloads levels in the background (live mode)
   if (this._vodPlayer?.isRunning()) this._vodPlayer.stop();
+  // a nimio:playback-end listener may have destroyed the player: nothing
+  // left to hand over
+  if (this._destroyed) return;
   // the VOD stop released the UI synchronously (before detaching media);
   // give it back to the live engine without starting it. A no-op when the
   // live engine already holds it.
@@ -110,8 +113,11 @@ VOD, the next switch to live does.
 In VOD mode, `_switchMode(LIVE)` runs the normal path: the VOD engine
 detaches (stays warm), the live engine attaches and, since its session was
 closed, starts a new connection to the new URL. One connection, no second
-`setStreamURL()` call. A failure restores VOD and emits the mode-switch
-error as today; the URL change stays recorded.
+`setStreamURL()` call. A failure of the switch itself (a refused detach or
+attach, the timeout) restores VOD and emits the mode-switch error as today;
+the URL change stays recorded. A destroy from a listener is not a failure:
+`destroy()` settles the switch silently and tears both engines down. Connection and
+codec failures after the attach are not switch failures, see Error handling.
 
 `stop()` in live mode with no VOD or a VOD that is not running behaves as
 today: the live engine stops. `stop()` in live mode with a warm VOD now
@@ -125,7 +131,9 @@ attach(ui, params, callback) {
   if (this._ui || this._destroyed) return false;
   // ... latency params, _attachUI(ui), the pbError branch as today
   if (params.idle) {
-    // take the UI without starting anything: the caller keeps us stopped
+    // take the UI without starting anything: the caller keeps us stopped;
+    // no live playback-end follows, so give the UI the stopped look here
+    this._ui.showStopped();
     if (callback) callback();
     return true;
   }
@@ -151,7 +159,30 @@ An idle attach leaves the engine stopped with the UI attached: the same
 state as after a live `stop()`. The pause timer, the playback generation
 and the render loop are untouched; a later `play()` is an initial play.
 
-### 3. SLDP manager (`src/sldp/manager.js`)
+### 2b. VOD engine (`src/nimio-vod.js`)
+
+`stop()` emits `nimio:playback-end` while it still holds the UI and the
+hls.js handler, and then detaches both. A listener that destroys the player
+from that event runs `destroy()` inside the emit, which releases the handler;
+`stop()` therefore returns right after the emit when the engine was
+destroyed meanwhile, instead of continuing into the detach. The facade's own
+guard (section 1) covers the rest of its `stop()`.
+
+### 3. UI stopped look (`src/ui/ui.js`)
+
+A live stop emits `nimio:playback-end` for live, and the UI's handler
+applies the stopped look: splash background, captions hidden, the native
+PiP capture stream released, controls paused on the play button. The new
+stop path emits the VOD event only, since the live engine was never
+started, and a second application-visible event would be wrong. The stopped
+look moves into a public `UI.showStopped()`, which the live playback-end
+handler runs and which the engine's idle attach calls right after taking
+the UI: `toggleMode(LIVE)` creates a capture stream for native PiP (video
+`srcObject` plus `play()`), and without this call the idle-attached engine's
+early-returning `stop()` would leave that stream running. The VOD branch of
+the playback-end handler is unchanged.
+
+### 4. SLDP manager (`src/sldp/manager.js`)
 
 ```js
 stop(opts = {}) {
@@ -180,7 +211,17 @@ reuses the session; `destroy()` already clears it.
   the event with the facade already pointing at live, so a `play()` from
   there starts live, as a live-mode stop would.
 - `setStreamURL()` with a failing switch: `_restoreMode()` re-attaches VOD,
-  the mode-switch error is emitted, the new URL is kept in the config.
+  the mode-switch error is emitted, the new URL is kept in the config. The
+  switch completes when the live engine's `attach()` calls back, which it
+  does synchronously after posting the start request (#91: the live engine
+  has no "media attached" event to wait for). "Failure" therefore means a
+  refused detach or attach, or the timeout; a destroy from a listener
+  settles the switch silently instead (`_cancelModeSwitch()`). A
+  socket that never opens or drops, an invalid status or an unsupported
+  codec afterwards are reported through the live error path (reconnect
+  attempts, then `nimio:playback-error`, or the startup VOD failover when
+  configured) and do not roll the switch back. The normal `seekLive()`
+  switch has the same property; this design inherits it.
 - Both methods return early on a destroyed player, as today.
 
 ## Testing (vitest, jsdom)
@@ -192,14 +233,21 @@ reuses the session; `destroy()` already clears it.
   reaches the live engine; `stop()` during a pending switch to VOD cancels
   the switch (timer cleared, no error emitted) and ends live and stopped;
   `stop()` in live mode with a warm VOD stops it without re-attaching live;
-  `stop()` with no VOD engine stops live only; `setStreamURL()` in VOD mode
+  `stop()` with no VOD engine stops live only; a `destroy()` from the VOD
+  playback-end listener leaves `stop()` silent; `setStreamURL()` in VOD mode
   calls the engine's `setStreamURL()` before the switch and attaches live
   once with `{ latency: 0 }`, ending in live mode; a refused attach restores
   VOD and emits the error; during a pending switch only the engine call runs
   and a warning is logged; in live mode only the engine call runs.
+- `tests/nimio-vod-lifecycle.test.js`: the real VOD engine's `stop()` with a
+  `nimio:playback-end` listener that destroys it ends quietly.
 - `tests/nimio-live-attach.test.js`: an idle attach takes the UI, calls back,
-  returns true, starts no state, no render loop and no connection; a later
-  `play()` starts normally.
+  returns true, gives the UI the stopped look, starts no state, no render
+  loop and no connection, and holds the UI afterwards. `tests/nimio-live-after-destroy.test.js` (full engine
+  fixture): an idle attach followed by `play()` is an initial play.
+- `tests/browser/ui-integration.test.js`: after a VOD playback-end and the
+  switch of the UI to live, `showStopped()` shows the splash and releases
+  the capture stream (`srcObject` cleared, tracks ended).
 - `tests/nimio-live.test.js`: a detached `setStreamURL()` closes a connected
   session and does nothing when disconnected; an attached stopped engine
   returns early as before.
