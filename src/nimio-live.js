@@ -1,6 +1,6 @@
 import audioProcUrl from "./audio/nimio-processor?worker&url"; // ?worker&url - Vite initiate new Rollup build
 import wsTransportUrl from "./transport/web-socket?worker&url";
-import { IDX, MODE } from "./shared/values";
+import { IDX, MODE, STATE } from "./shared/values";
 import { runCleanupSteps } from "./shared/helpers";
 import { StateManager } from "./state-manager";
 import { SLDPManager } from "./sldp/manager";
@@ -117,6 +117,8 @@ export class NimioLive {
 
     this._playCb = this.play.bind(this);
     this._autoplayTimers = [];
+    this._retryCancelled = false; // a pause() cancelled a pending retry
+    this._playingBeforeDrop = false; // what the player did when it dropped
     if (this._config.autoplay) this._scheduleAutoplay();
 
     if (this._config.screenshots) {
@@ -132,7 +134,13 @@ export class NimioLive {
   _rollbackInit() {
     this._destroyed = true;
     runCleanupSteps(this._logger, "init rollback", [
-      ["autoplay", () => this._cancelAutoplay()],
+      [
+        "autoplay",
+        () => {
+          this._cancelAutoplay();
+          this._cancelControlsTimer();
+        },
+      ],
       ["UI handlers", () => this._removeUIEventHandlers()],
       ["transport handlers", () => this._transport && this._deinitTransport()],
       [
@@ -154,11 +162,7 @@ export class NimioLive {
     const initialPlay = !this._state.isPaused();
     this._cancelPauseTimeout();
 
-    this._state.start();
-    this._latencyCtrl.start();
-    if (this._isAutoAbr()) {
-      this._startAbrController();
-    }
+    this._beginPlayback();
     const gen0 = this._playGen;
     this._eventBus.emit("nimio:play", { mode: MODE.LIVE });
     // a listener may have destroyed, stopped or restarted the player
@@ -181,6 +185,23 @@ export class NimioLive {
 
   pause() {
     if (this._destroyed || this._state.isPaused()) return;
+    if (this._state.isStopped()) {
+      // a stopped engine has nothing to pause, and marking it paused would
+      // make the next play() skip the connection start. During a reconnect
+      // wait the user asked for playback to stop: cancel the retry. The
+      // event is emitted either way: after an engine-internal stop (server
+      // rejection, reconnects exhausted) the UI still shows the pause
+      // glyph, and this click must flip it to play, or the button is dead;
+      // the next play() is an initial play. The autoplay of a
+      // just-constructed player must not play over the pause either. A
+      // cancelled retry ends the playback the application still sees: the
+      // next closing stop() reports it (this call reports the pause).
+      this._cancelAutoplay();
+      if (this._reconnect.pending) this._retryCancelled = true;
+      this._reconnect.stop();
+      this._eventBus.emit("nimio:pause", { mode: MODE.LIVE });
+      return;
+    }
 
     this._state.pause();
     this._latencyCtrl.pause();
@@ -195,12 +216,31 @@ export class NimioLive {
   }
 
   stop(opts = {}) {
+    // timers that would start playback after the stop: the autoplay of a
+    // just-constructed player and a reconnect attempt. Cancelled before the
+    // early return, since both run while the engine is already stopped.
+    const retryPending = this._reconnect.pending || this._retryCancelled;
+    this._retryCancelled = false;
+    this._cancelAutoplay();
+    this._reconnect.stop();
     const isStopped = this._state.isStopped();
     const closeConnection = !opts.keepConnection;
-    if (!isStopped || (closeConnection && this._transport.connected)) {
+    // a socket that is still connecting may open after the stop and hold
+    // an idle server session: it needs the closing command as well
+    const hasSocket = this._transport.connected || this._transport.connecting;
+    if (!isStopped || (closeConnection && hasSocket)) {
       this._sldpManager.stop({ closeConnection });
     }
-    if (isStopped) return;
+    if (isStopped) {
+      // a dropped connection stopped the engine silently because a retry
+      // was coming; cancelling that retry (here, or by an earlier pause)
+      // ends the playback the application and the UI still see (a detach
+      // keeps it for a restart)
+      if (retryPending && closeConnection) {
+        this._eventBus.emit("nimio:playback-end", { mode: MODE.LIVE });
+      }
+      return;
+    }
 
     this._state.stop();
     this._reconnect.reset();
@@ -217,17 +257,22 @@ export class NimioLive {
     }
   }
 
+  // True while the application still sees a player whose live playback
+  // ended silently: a dropped connection waiting for its retry (a playing
+  // player, or a paused one that dropped), or a pause() that cancelled that
+  // retry (a paused one). The
+  // next closing stop() reports the end; a detach() consumes the state
+  // without reporting, so the facade snapshots it before a switch and
+  // reports the end itself when the switch is rolled back. A retry pending
+  // for a drop during playback makes detach() record a playing state, and
+  // the rollback restarts live instead; the paused cases (a pause() during
+  // the wait, or a drop while paused) reach the report.
+  hasUnreportedEnd() {
+    return !!(this._reconnect.pending || this._retryCancelled);
+  }
+
   // The URL is already updated in the config
   setStreamURL() {
-    if (!this._ui) {
-      // detached (VOD mode): a kept-alive session belongs to the old URL,
-      // the next attach() must handshake. Nothing to close when the
-      // transport is not connected (the worker's close needs a socket).
-      if (this._transport.connected) {
-        this._sldpManager.stop({ closeConnection: true });
-      }
-      return;
-    }
     if (this._state.isStopped()) return;
 
     const playing = this._state.isPlaying();
@@ -254,11 +299,14 @@ export class NimioLive {
       this.setParameters(params);
     }
 
-    this._attachUI(ui);
+    // idle and error attaches show the stopped look: no capture stream
+    this._attachUI(ui, { idle: !!(params.idle || params.pbError) });
 
     if (params.pbError) {
       // the stream isn't in fact discontinued, but it couldn't be played
-      // via both live and vod players, so the error notification should be shown
+      // via both live and vod players, so the error notification should be
+      // shown, over the stopped look
+      this._ui.showStopped();
       this._eventBus.emit("aux:playback-error", {
         type: "NO_SRC",
         mode: MODE.LIVE,
@@ -273,17 +321,14 @@ export class NimioLive {
       // take the UI without starting anything: the caller keeps us stopped
       // (the facade's stop() in VOD mode); a later play() is an initial play.
       // No live playback-end is emitted, so give the UI the stopped look here
-      // (toggleMode(LIVE) created a capture stream the stop would release)
+      // (splash, captions, controls; a capture stream left from an earlier
+      // live playback is released too)
       this._ui.showStopped();
       if (callback) callback();
       return true;
     }
 
-    this._state.start();
-    this._latencyCtrl.start();
-    if (this._isAutoAbr()) {
-      this._startAbrController();
-    }
+    this._beginPlayback();
     this._playbackStarted = false;
     const gen = this._startRenderLoop();
 
@@ -329,17 +374,28 @@ export class NimioLive {
       return true;
     }
 
-    this._context.setState(this._state.value, false);
+    // the state the application sees: a connection that dropped during
+    // playback and waits for its retry is still a playing player (the
+    // engine itself is stopped), so a seek into VOD plays the archive and a
+    // rollback restarts live, as a seek during playback does; one that
+    // dropped while paused keeps the pause (the archive opens paused)
+    this._context.setState(
+      this._reconnect.pending && this._playingBeforeDrop
+        ? STATE.PLAYING
+        : this._state.value,
+      false,
+    );
+    // also cancels a retry _onDisconnect() scheduled (its prologue runs
+    // before the early return on a stopped engine), which would otherwise
+    // play() on a detached engine
     this.stop({ keepConnection: true });
-    // stop() returns early on an engine _onDisconnect() already stopped, so
-    // the reconnect it scheduled would play() on a detached engine
-    this._reconnect.stop();
     if (this._sldpManager.sessionReady) {
       // the session has stream metadata: keep it for a later attach()
       this._sldpManager.keepAliveConnection();
-    } else if (this._transport.connected) {
+    } else if (this._transport.connected || this._transport.connecting) {
       // nothing to reuse (attach() would handshake anyway): close it now;
-      // a socket that never opened is replaced by attach()'s start()
+      // a socket still connecting would otherwise open while detached and
+      // hold an idle server session until the next start
       this._sldpManager.stop({ closeConnection: true });
     }
 
@@ -513,9 +569,10 @@ export class NimioLive {
     return 0;
   }
 
-  _attachUI(ui) {
+  _attachUI(ui, { idle = false } = {}) {
     this._ui = ui;
-    this._ui.toggleMode(MODE.LIVE);
+    // an idle attach shows the stopped look; no capture stream for it
+    this._ui.toggleMode(MODE.LIVE, { capture: !idle });
   }
 
   _detachUI() {
@@ -770,12 +827,28 @@ export class NimioLive {
   }
 
   _scheduleAutoplay() {
-    this._autoplayTimers = [
-      setTimeout(this._playCb, 0),
-      setTimeout(() => {
-        if (this._ui) this._ui.hideControls(true);
-      }, 1000),
-    ];
+    this._autoplayTimers = [setTimeout(this._playCb, 0)];
+    // the controls fade belongs to the autoplay start, not to the play
+    // request: a stop() cancels the play only, destroy() cancels both
+    this._controlsTimer = setTimeout(() => {
+      this._controlsTimer = undefined;
+      // a player stopped meanwhile (an early stop, an immediate server
+      // rejection) keeps its controls visible
+      if (this._ui && !this._state.isStopped()) this._ui.hideControls(true);
+    }, 1000);
+  }
+
+  // The start shared by play() and attach(): a new playback is what the
+  // application sees from now on, so an end a pause() left unreported
+  // belongs to the previous one.
+  _beginPlayback() {
+    this._state.start();
+    this._retryCancelled = false;
+    this._playingBeforeDrop = false;
+    this._latencyCtrl.start();
+    if (this._isAutoAbr()) {
+      this._startAbrController();
+    }
   }
 
   // a destroyed (or rolled back) engine must not autoplay afterwards
@@ -784,11 +857,17 @@ export class NimioLive {
     this._autoplayTimers = [];
   }
 
+  _cancelControlsTimer() {
+    clearTimeout(this._controlsTimer);
+    this._controlsTimer = undefined;
+  }
+
   // Final release of everything _resetPlayback() would release, each part
   // idempotent, for a destroy() whose stop stage did not get that far.
   _releaseMediaResources() {
     this._cancelPauseTimeout();
     this._cancelAutoplay();
+    this._cancelControlsTimer();
     this._state.stop(); // ends the render loop even if stop() threw early
     this._abrController?.stop({ hard: true });
     if (this._nextRenditionData) {

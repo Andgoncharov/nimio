@@ -14,6 +14,7 @@ export class TransportAdapter {
     this._callbacks = {};
     this._worker.onmessage = (e) => this._handleMessage(e.data);
     this._connected = false;
+    this._connecting = false; // a start was sent, the socket's fate unknown
     this._session = 0; // numbers each "start"; the worker tags its replies
   }
 
@@ -25,6 +26,12 @@ export class TransportAdapter {
       // the previous socket is being replaced and the new one is not open
       // yet; its own connected:true/false will follow with the new session
       this._connected = false;
+      this._connecting = true;
+    } else if (cmd === "stop" && data.close) {
+      // the worker closes the socket and reports it in a later task; until
+      // then a second stop would send another close it only logs about
+      this._connected = false;
+      this._connecting = false;
     }
     this._worker.postMessage(data);
   }
@@ -36,6 +43,7 @@ export class TransportAdapter {
     this._worker = undefined;
     this._callbacks = {};
     this._connected = false;
+    this._connecting = false;
     worker.onmessage = null;
     try {
       // handled after any stop/close already queued, so the socket is
@@ -49,6 +57,12 @@ export class TransportAdapter {
 
   get connected() {
     return this._connected;
+  }
+
+  // True between a start and the worker's first connected:true/false for
+  // it: a socket that may still open, so a closing stop must reach it.
+  get connecting() {
+    return this._connecting;
   }
 
   get callbacks() {
@@ -84,6 +98,7 @@ export class TransportAdapter {
       if ("connected" in msg) {
         // console.log(`Connected ${msg.connected}`);
         this._connected = msg.connected;
+        this._connecting = false;
       }
     }
   }

@@ -67,6 +67,9 @@ export const NimioTransport = {
   _onDisconnect(data) {
     if (this._state.isStopped()) return;
 
+    // the intent the retry resumes, and what a seek into VOD during the
+    // wait follows: a paused player stays paused
+    this._playingBeforeDrop = this._state.isPlaying();
     this._state.stop();
     this._sldpManager.resetRequestedStreams();
     if (this._isAutoAbr()) {
