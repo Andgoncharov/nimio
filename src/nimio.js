@@ -1,6 +1,6 @@
 import { ScriptPathProvider } from "./shared/script-path-provider";
 import { EventBus } from "./event-bus";
-import { MODE, ERROR } from "./shared/values";
+import { MODE, ERROR, STATE } from "./shared/values";
 import { UI } from "./ui/ui";
 import { NimioLive } from "./nimio-live";
 import { NimioVod } from "./nimio-vod";
@@ -114,10 +114,14 @@ export default class Nimio {
 
     this._actPlayer = this._livePlayer;
     this._mode = MODE.LIVE;
+    this._vodStartGen = 0; // voids VOD starts that resolve after a stop
+    this._stopping = false; // re-entrancy guard for stop()
+    this._playAfterStop = false; // a play() asked for while stopping
     this._eventBus.on("aux:playback-error", this._onError);
 
     this._playProgressSvc = PlaybackProgressService.getInstance(this._instName);
-    this._playProgressSvc.positionChangeCb = this._onPlaybackPositionChange;
+    this._playProgressSvc.positionChangeCb =
+      this._onPlaybackPositionChange.bind(this);
     this._playProgressProxy = new PlaybackProgressProxy(
       this._eventBus,
       this._playProgressSvc,
@@ -181,52 +185,95 @@ export default class Nimio {
   }
 
   play() {
+    if (this._destroyed) return;
+    if (this._stopping) {
+      // from a listener of the VOD end event of a stop in progress: the VOD
+      // engine still holds the UI, so the play runs as the stop's last step
+      this._playAfterStop = true;
+      return;
+    }
     this._actPlayer?.play();
   }
 
   setStreamURL(url) {
     if (this._destroyed) return;
+    const prevVodUrl = this._config.vod?.url;
     updateConfigStreamURL(this._config, url);
-    // detached (VOD mode or a pending switch): closes the kept-alive
-    // session of the old URL so the next attach handshakes; attached:
-    // stop + play with the new URL
-    this._livePlayer.setStreamURL();
-    if (this._mode === MODE.VOD) {
-      // the switch's attach handshakes with the new URL: one connection,
-      // and a failure restores VOD and is reported
-      this._switchMode(MODE.LIVE, { latency: 0 });
-    } else if (this._mode === MODE.PEND) {
-      this._logger.warn(
-        "Stream URL changed during a mode switch; applied on the next attach",
-      );
+    // re-entrant from a listener of a stop in progress: the outer call
+    // continues with the newest config
+    if (this._stopping) return;
+    if (this._mode === MODE.LIVE) {
+      if (this._config.vod?.url !== prevVodUrl) {
+        // a pending VOD start would attach the old URL; a running engine
+        // re-initialises with the new URL on the next
+        // nimio:connection-established and must not be attachable before;
+        // the engine stop also cancels a queued reload
+        this._vodStartGen++;
+        this._vodPlayer?.stop();
+      }
+      // playing: stop + play; paused: stop; stopped: nothing (#98)
+      this._livePlayer.setStreamURL();
+      return;
     }
+    // VOD mode or a pending switch: stop (VOD stopped, live idle with the
+    // UI, kept-alive session closed, context reset), then an initial live
+    // play with the new URL, performed by the stop as its last step. One
+    // connection; no path back to the old archive.
+    this._playAfterStop = true;
+    this.stop();
   }
 
   pause() {
+    if (this._destroyed || this._stopping) return;
     this._actPlayer?.pause();
   }
 
   stop() {
-    if (this._destroyed) return;
-    // a switch in flight cannot complete into a stopped player; settle it
-    // silently (no error: the stop is what the application asked for)
-    this._cancelModeSwitch();
-    // running covers the attached VOD engine (VOD mode) and the warm,
-    // detached one that reloads levels in the background (live mode)
-    if (this._vodPlayer?.isRunning()) this._vodPlayer.stop();
-    // a nimio:playback-end listener may have destroyed the player: the
-    // engines are gone and the session closed, nothing left to hand over
-    if (this._destroyed) return;
-    // the VOD stop released the UI synchronously (before detaching media):
-    // give it back to the live engine without starting it. A no-op when
-    // the live engine already holds it.
-    this._livePlayer.attach(this._ui, { latency: 0, idle: true });
-    this._activate(this._livePlayer, MODE.LIVE);
-    this._livePlayer.stop(); // also closes a kept-alive session
+    if (this._destroyed || this._stopping) return;
+    this._stopping = true;
+    try {
+      // a switch in flight cannot complete into a stopped player; settle it
+      // silently (no error: the stop is what the application asked for)
+      this._cancelModeSwitch();
+      // a VOD start still waiting for hls.js must not switch to VOD later
+      this._vodStartGen++;
+      // unconditional: the attached engine (VOD mode), the warm detached one
+      // (live mode), a stopped one reloading a new URL in the background,
+      // and a queued initialize() a seek left behind are all ended by it;
+      // a cold engine ignores it
+      this._vodPlayer?.stop();
+      // a nimio:playback-end listener may have destroyed the player: the
+      // engines are gone and the session closed, nothing left to hand over
+      if (this._destroyed) return;
+      // the VOD stop released the UI synchronously (before detaching media):
+      // give it back to the live engine without starting it. A no-op when
+      // the live engine already holds it.
+      this._livePlayer.attach(this._ui, { latency: 0, idle: true });
+      this._activate(this._livePlayer, MODE.LIVE);
+      // the live stop is the last step and emits its playback-end last:
+      // an application that restarts from that event gets a clean initial
+      // play, as in the base (the guard protected the VOD stop, where the
+      // engine still held the UI)
+      this._stopping = false;
+      this._livePlayer.stop(); // also closes a kept-alive session
+      // the live playback-end listener may have destroyed the player too
+      if (this._destroyed) return;
+      // a stopped player presents a stopped context: the next VOD start
+      // (a seek) opens paused, whatever the VOD detach recorded
+      this._context.resetState();
+      // a URL change, or a play() from the VOD end-event listener: an
+      // initial live play from the stopped player
+      if (this._playAfterStop) {
+        this._playAfterStop = false;
+        this._livePlayer.play();
+      }
+    } finally {
+      this._stopping = false;
+    }
   }
 
   seekVod(position) {
-    if (this._destroyed) return false;
+    if (this._destroyed || this._stopping) return false;
     if (this._vodPlayer && this._vodPlayer.isRunning()) {
       return this._playProgressProxy.seekVod(position);
     }
@@ -235,6 +282,7 @@ export default class Nimio {
   }
 
   seekLive(buffer) {
+    if (this._destroyed || this._stopping) return false;
     if (!this._playProgressProxy) return false;
     if (buffer === undefined || buffer === null) buffer = 0;
     return this._playProgressProxy.seekLive(buffer);
@@ -259,20 +307,27 @@ export default class Nimio {
     });
   }
 
-  _runVodFromStart(pos) {
-    if (this._vodPlayer?.isLoaded() && !this._vodPlayer.isRunning()) {
-      this._vodPlayer.initialize(this._ui.mediaElement).then(() => {
-        if (this._destroyed) return;
-        let curState = this._context.state.value;
-        this._switchToVod(pos);
-        this._context.setState(curState, true);
-        this._context.autoAbr = !!this._config.adaptiveBitrate;
-      });
-
-      return true;
+  // Start VOD from a non-running engine (stopped, or loaded but never
+  // attached): the seek bar and seekVod() on a stopped or cold engine, and
+  // the startup VOD failover. The engine re-initialises when its URL is
+  // stale. `initial` marks the failover, where the autoplay setting decides;
+  // everywhere else the VOD plays when the live engine was playing and
+  // opens paused otherwise: the live detach records the engine's state in
+  // the context and the VOD engine's _onLevelLoaded reads it.
+  _runVodFromStart(pos, { initial = false } = {}) {
+    if (!this._vodPlayer?.isLoaded() || this._vodPlayer.isRunning()) {
+      return false;
     }
+    const gen = ++this._vodStartGen;
+    this._vodPlayer.initialize(this._ui.mediaElement).then(() => {
+      // destroyed, stopped or re-targeted meanwhile: the start is void
+      if (this._destroyed || gen !== this._vodStartGen) return;
+      this._switchToVod(pos);
+      this._context.setState(this._context.state.value, initial);
+      this._context.autoAbr = !!this._config.adaptiveBitrate;
+    });
 
-    return false;
+    return true;
   }
 
   _switchToVod(position) {
@@ -324,9 +379,20 @@ export default class Nimio {
       MODE_SWITCH_TIMEOUT_MS,
     );
 
+    // a live engine whose retry a pause() cancelled during a reconnect
+    // wait, or that dropped while paused and waits for its retry, is
+    // stopped, but the application still sees it paused; the detach
+    // consumes that state, so a rollback must report the end (the snapshot
+    // below says "stopped"). A retry pending for a drop during playback is
+    // recorded as playing by the detach and takes the restart branch.
+    sw.prevEndUnreported = !!sw.prevPlayer.hasUnreportedEnd?.();
     const detached = sw.prevPlayer.detach(() => {
       if (sw.settled) return;
       sw.detached = true;
+      // the previous engine's detach just recorded its playback state in
+      // the context; a rollback restores from this snapshot, since the new
+      // engine's own detach overwrites the context with its state
+      sw.prevState = this._context.state.value;
       this._activate(sw.nextPlayer, MODE.PEND);
       sw.attachStarted = sw.nextPlayer.attach(this._ui, attachParams, () =>
         this._finishModeSwitch(sw, true),
@@ -356,6 +422,8 @@ export default class Nimio {
       `Switch to ${sw.target} failed (${reason}), restoring ${sw.prevMode}`,
     );
     this._restoreMode(sw);
+    // a listener of the playback end an idle restore emits may destroy
+    if (this._destroyed) return;
     this._eventBus.emit("nimio:playback-error", {
       error: ERROR.MODE_SWITCH,
       mode: sw.target,
@@ -373,9 +441,34 @@ export default class Nimio {
     // detach was refused, the previous engine never changed state and
     // attaching it would start it rather than restore it.
     if (!sw.detached) return;
-    const params = sw.prevMode === MODE.LIVE ? { latency: 0 } : undefined;
+    // Restore the playback state the previous engine had when it let go of
+    // the UI (the new engine's detach above overwrote the context): a live
+    // engine that was playing is restarted; a stopped or paused one takes
+    // the UI back idle, so a failed seek into VOD on a stopped player does
+    // not start playback nobody asked for. VOD reads the context itself.
+    this._context.setState(sw.prevState);
+    let params;
+    if (sw.prevMode === MODE.LIVE) {
+      params =
+        sw.prevState === STATE.PLAYING
+          ? { latency: 0 }
+          : { latency: 0, idle: true };
+    }
     if (!sw.prevPlayer.attach(this._ui, params, () => {})) {
       this._logger.error(`Could not re-attach ${sw.prevMode} player`);
+    } else if (params?.idle) {
+      // a paused engine's detach kept its server session alive for a
+      // restart; a restored player that shows the splash must not keep it
+      sw.prevPlayer.stop();
+      if (sw.prevState === STATE.PAUSED || sw.prevEndUnreported) {
+        // the detach stopped the paused engine without an event (its
+        // session was kept), or consumed an end left unreported by a pause()
+        // during a reconnect wait or by a drop while paused, and the engine's
+        // stop above found it stopped: the application still holds a paused
+        // player, tell it the playback ended (a stopped engine never played:
+        // nothing to end)
+        this._eventBus.emit("nimio:playback-end", { mode: MODE.LIVE });
+      }
     }
   }
 
@@ -409,7 +502,7 @@ export default class Nimio {
         if (allowFailover && this._config.vod?.startupVodFailover) {
           // TODO: VOD failover happens on the first run only, to make it
           // always try VOD use the same logic as seekVod() method does
-          vodStarted = this._runVodFromStart();
+          vodStarted = this._runVodFromStart(undefined, { initial: true });
         }
 
         if (!vodStarted) {
@@ -462,18 +555,27 @@ export default class Nimio {
     this._vodPlayer.initialize();
   };
 
-  _onPlaybackPositionChange = (mode, val) => {
+  _onPlaybackPositionChange(mode, val) {
     this._logger.debug(
       `_onPlaybackPositionChange new mode = ${mode}, value = ${val}, cur mode = ${this._mode}`,
     );
-    if (this._destroyed || this._mode === MODE.PEND) return false;
+    if (this._destroyed || this._stopping || this._mode === MODE.PEND) {
+      return false;
+    }
 
     if (mode === this._mode) {
       return this._actPlayer.goto(val);
     }
 
+    if (mode === MODE.VOD && !this._vodPlayer?.isRunning()) {
+      // the seek bar and seekVod() share one path into a non-running
+      // engine: a stopped engine is attachable as-is and would play the
+      // URL it was stopped with
+      return this._runVodFromStart(val);
+    }
+
     return mode === MODE.VOD ? this._switchToVod(val) : this._switchToLive(val);
-  };
+  }
 
   _addVolumeEventHandlers() {
     this._onMuteUnmuteClick = this._onMuteUnmuteClick.bind(this);

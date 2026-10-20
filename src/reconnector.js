@@ -25,6 +25,11 @@ export class Reconnector {
     this._done = 0;
   }
 
+  // True while a retry is scheduled and has not fired yet.
+  get pending() {
+    return !!this._timer;
+  }
+
   stop() {
     if (!this._timer) return;
     clearTimeout(this._timer);
